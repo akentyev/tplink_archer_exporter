@@ -1,0 +1,14 @@
+[
+  {
+    "mac": "00-00-5E-00-53-15",
+    "client_num": 19,
+    "ip": "192.0.2.22",
+    "role": "main_router",
+    "name": "Archer AX80",
+    "model": "Archer AX80",
+    "status": "connected",
+    "location": "",
+    "vendor": "TP-Link",
+    "device_type": "WirelessRouter"
+  }
+]

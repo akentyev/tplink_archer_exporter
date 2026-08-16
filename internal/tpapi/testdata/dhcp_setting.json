@@ -1,0 +1,10 @@
+{
+  "enable": "on",
+  "leasetime": "120",
+  "pri_dns": "",
+  "snd_dns": "",
+  "gateway": "192.0.2.22",
+  "ipaddr_start": "192.0.2.23",
+  "domain": "",
+  "ipaddr_end": "192.0.2.24"
+}

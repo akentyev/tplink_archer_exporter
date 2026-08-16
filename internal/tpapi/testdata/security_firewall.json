@@ -1,0 +1,5 @@
+{
+  "enable": "on",
+  "lan_ping": "on",
+  "wan_ping": "off"
+}

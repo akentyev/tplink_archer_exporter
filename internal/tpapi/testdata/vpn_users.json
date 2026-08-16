@@ -1,0 +1,26 @@
+[
+  {
+    "mac": "00:00:5E:00:53:0B",
+    "client_type": "pc",
+    "access": "off",
+    "name": "bulb-a"
+  },
+  {
+    "mac": "00:00:5E:00:53:16",
+    "client_type": "Computer",
+    "access": "off",
+    "name": "camera25"
+  },
+  {
+    "mac": "00:00:5E:00:53:17",
+    "client_type": "pc",
+    "access": "on",
+    "name": "bulb-a"
+  },
+  {
+    "mac": "00:00:5E:00:53:0A",
+    "client_type": "pc",
+    "access": "on",
+    "name": "thermostat"
+  }
+]

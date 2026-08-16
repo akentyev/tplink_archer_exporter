@@ -1,0 +1,23 @@
+/bin/
+.idea/
+
+# Recon dumps map a real network: MAC addresses, IPs, hostnames, SSIDs, VPN
+# endpoints. Redaction strips credentials, not identity. Test fixtures live in
+# internal/*/testdata and are anonymised by hand.
+/recon-out/
+/recon-*/
+
+# Plans, specs and working notes
+/.local/
+
+# Working notes
+CLAUDE.md
+
+# Local copy of the router's own JS bundle, kept for protocol lookups without
+# touching the device (it allows one web session). Third-party code: never commit.
+/.router-js/
+
+# The router password: README asks for a .env, docker-compose for a secret file.
+.env
+.env.*
+/tplink_password

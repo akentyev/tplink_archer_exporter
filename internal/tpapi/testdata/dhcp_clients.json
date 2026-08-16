@@ -1,0 +1,116 @@
+[
+  {
+    "leasetime": "Permanent",
+    "macaddr": "00-00-5E-00-53-00",
+    "name": "laptop",
+    "ipaddr": "192.0.2.1"
+  },
+  {
+    "leasetime": "Permanent",
+    "macaddr": "00-00-5E-00-53-01",
+    "name": "laptop",
+    "ipaddr": "192.0.2.2"
+  },
+  {
+    "leasetime": "Permanent",
+    "macaddr": "00-00-5E-00-53-02",
+    "name": "desk-pc",
+    "ipaddr": "192.0.2.3"
+  },
+  {
+    "leasetime": "2144:2:32",
+    "macaddr": "00-00-5E-00-53-03",
+    "name": "tablet",
+    "ipaddr": "192.0.2.4"
+  },
+  {
+    "leasetime": "Permanent",
+    "macaddr": "00-00-5E-00-53-04",
+    "name": "phone",
+    "ipaddr": "192.0.2.5"
+  },
+  {
+    "leasetime": "Permanent",
+    "macaddr": "00-00-5E-00-53-05",
+    "name": "tv",
+    "ipaddr": "192.0.2.6"
+  },
+  {
+    "leasetime": "Permanent",
+    "macaddr": "00-00-5E-00-53-06",
+    "name": "printer",
+    "ipaddr": "192.0.2.7"
+  },
+  {
+    "leasetime": "Permanent",
+    "macaddr": "00-00-5E-00-53-07",
+    "name": "speaker",
+    "ipaddr": "192.0.2.8"
+  },
+  {
+    "leasetime": "Permanent",
+    "macaddr": "00-00-5E-00-53-08",
+    "name": "camera",
+    "ipaddr": "192.0.2.9"
+  },
+  {
+    "leasetime": "1:27:2",
+    "macaddr": "00-00-5E-00-53-09",
+    "name": "nas",
+    "ipaddr": "192.0.2.10"
+  },
+  {
+    "leasetime": "1:32:14",
+    "macaddr": "00-00-5E-00-53-0A",
+    "name": "thermostat",
+    "ipaddr": "192.0.2.11"
+  },
+  {
+    "leasetime": "1:26:49",
+    "macaddr": "00-00-5E-00-53-0B",
+    "name": "bulb-a",
+    "ipaddr": "192.0.2.12"
+  },
+  {
+    "leasetime": "Permanent",
+    "macaddr": "00-00-5E-00-53-0C",
+    "name": "bulb-b",
+    "ipaddr": "192.0.2.13"
+  },
+  {
+    "leasetime": "Permanent",
+    "macaddr": "00-00-5E-00-53-0D",
+    "name": "watch",
+    "ipaddr": "192.0.2.14"
+  },
+  {
+    "leasetime": "1:9:10",
+    "macaddr": "00-00-5E-00-53-0E",
+    "name": "console",
+    "ipaddr": "192.0.2.15"
+  },
+  {
+    "leasetime": "Permanent",
+    "macaddr": "00-00-5E-00-53-0F",
+    "name": "speaker",
+    "ipaddr": "192.0.2.16"
+  },
+  {
+    "leasetime": "2159:58:5",
+    "macaddr": "00-00-5E-00-53-10",
+    "name": "hub",
+    "ipaddr": "192.0.2.17"
+  },
+  {
+    "leasetime": "Permanent",
+    "macaddr": "00-00-5E-00-53-11",
+    "name": "plug",
+    "ipaddr": "192.0.2.18"
+  },
+  {
+    "leasetime": "Permanent",
+    "macaddr": "00-00-5E-00-53-12",
+    "name": "sensor",
+    "ipaddr": "192.0.2.19"
+  }
+]

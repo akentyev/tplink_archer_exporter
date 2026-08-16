@@ -1,0 +1,29 @@
+[
+  {
+    ".anonymous": true,
+    ".name": "cfg02769c",
+    ".type": "server",
+    "address": "192.0.2.25/16",
+    "allowed_ips": "0.0.0.0/0",
+    "des": "NordVPN",
+    "dns": "192.0.2.26",
+    "download_speed": 1598,
+    "enable": "on",
+    "endpoint_address": "vpn.example.net",
+    "endpoint_port": "51820",
+    "is_third": "true",
+    "key": "<redacted>",
+    "kill_switch": "off",
+    "manual": false,
+    "nat": true,
+    "persistent_keepalive": "25",
+    "private_key": "<redacted>",
+    "public_key": "<redacted>",
+    "server": "dummy",
+    "status": "connected",
+    "type": "wireguard",
+    "upload_speed": 1147,
+    "vendor": "nordvpn",
+    "wg_dns": "192.0.2.26"
+  }
+]

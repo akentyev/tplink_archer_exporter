@@ -1,0 +1,7 @@
+# recon-out/ maps a real network and .router-js/ is TP-Link's code: neither goes
+# into the build context.
+*
+!go.mod
+!go.sum
+!cmd/
+!internal/

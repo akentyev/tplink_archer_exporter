@@ -1,0 +1,61 @@
+# Example deployment. Bridge networking reaches the router; no host networking,
+# no extra capabilities.
+#
+# Nothing is published: the exporter is reached over the monitoring network as
+# tplink-exporter:9110, by anything joined to it. To publish it on the host as
+# well, add docker-compose.expose.yml:
+#
+#     docker compose -f docker-compose.yml -f docker-compose.expose.yml up -d
+services:
+  tplink-exporter:
+    build: .
+    image: tplink_archer_exporter:latest
+    container_name: tplink-exporter
+    restart: unless-stopped
+    networks: [monitoring]
+    environment:
+      TPLINK_HOST: ${TPLINK_HOST:?set TPLINK_HOST, e.g. 192.168.0.1}
+      TPLINK_PASSWORD_FILE: /run/secrets/tplink_password
+      TPLINK_INTERVAL: 60s
+      TPLINK_LOG_LEVEL: info
+      # The router reports a TP-Link timezone index rather than an offset, so
+      # its wall clock is read in the exporter's own zone. Without this the
+      # container runs UTC and tplink_router_clock_timestamp_seconds is out by
+      # the difference, which reads as drift that is not there.
+      TZ: ${TZ:-UTC}
+    secrets:
+      - tplink_password
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    # Shutdown logs out to free the router's single web session, and that logout
+    # is bounded by min(TPLINK_TIMEOUT, TPLINK_REQUEST_TIMEOUT). Docker's default
+    # grace period is 10s.
+    stop_grace_period: 30s
+
+networks:
+  # `docker network create monitoring` first: external means neither stack owns
+  # it, so `docker compose down` on one leaves the other reachable. Without it
+  # compose refuses to start — "declared as external, but could not be found".
+  #
+  # Only for a scraper outside this file. One declared here would resolve
+  # tplink-exporter on the network compose makes for the project by itself.
+  monitoring:
+    name: monitoring
+    external: true
+
+secrets:
+  tplink_password:
+    # One line, the password. Gitignored. The container runs as uid 65532, so on
+    # Linux the file must be readable by it — compose's uid/gid/mode keys are
+    # swarm-only and do nothing here.
+    file: ./tplink_password
+
+# Passing the password as an environment variable instead puts it in
+# `docker inspect` and in `docker compose config` output:
+#
+#    environment:
+#      TPLINK_PASSWORD: ${TPLINK_PASSWORD:?set TPLINK_PASSWORD}
+#
+# Fine for a quick test, not for something left running.

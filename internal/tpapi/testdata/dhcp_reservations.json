@@ -1,0 +1,121 @@
+[
+  {
+    "mac": "00-00-5E-00-53-01",
+    "comment": "laptop",
+    "hostname": "laptop",
+    "enable": "on",
+    "ip": "192.0.2.2"
+  },
+  {
+    "mac": "00-00-5E-00-53-00",
+    "comment": "laptop",
+    "hostname": "laptop",
+    "enable": "on",
+    "ip": "192.0.2.1"
+  },
+  {
+    "mac": "00-00-5E-00-53-03",
+    "comment": "tablet",
+    "hostname": "tablet",
+    "enable": "on",
+    "ip": "192.0.2.4"
+  },
+  {
+    "mac": "00-00-5E-00-53-02",
+    "comment": "desk-pc",
+    "hostname": "desk-pc",
+    "enable": "on",
+    "ip": "192.0.2.3"
+  },
+  {
+    "mac": "00-00-5E-00-53-11",
+    "comment": "plug",
+    "hostname": "plug",
+    "enable": "on",
+    "ip": "192.0.2.18"
+  },
+  {
+    "mac": "00-00-5E-00-53-10",
+    "comment": "hub",
+    "hostname": "hub",
+    "enable": "on",
+    "ip": "192.0.2.17"
+  },
+  {
+    "mac": "00-00-5E-00-53-04",
+    "comment": "phone",
+    "hostname": "phone",
+    "enable": "on",
+    "ip": "192.0.2.5"
+  },
+  {
+    "mac": "00-00-5E-00-53-05",
+    "comment": "tv",
+    "hostname": "tv",
+    "enable": "on",
+    "ip": "192.0.2.6"
+  },
+  {
+    "mac": "00-00-5E-00-53-06",
+    "comment": "printer",
+    "hostname": "printer",
+    "enable": "on",
+    "ip": "192.0.2.7"
+  },
+  {
+    "mac": "00-00-5E-00-53-12",
+    "comment": "sensor",
+    "hostname": "sensor",
+    "enable": "on",
+    "ip": "192.0.2.19"
+  },
+  {
+    "mac": "00-00-5E-00-53-0F",
+    "comment": "speaker",
+    "hostname": "speaker",
+    "enable": "on",
+    "ip": "192.0.2.16"
+  },
+  {
+    "mac": "00-00-5E-00-53-07",
+    "comment": "speaker",
+    "hostname": "speaker",
+    "enable": "on",
+    "ip": "192.0.2.8"
+  },
+  {
+    "mac": "00-00-5E-00-53-0D",
+    "comment": "watch",
+    "hostname": "watch",
+    "enable": "on",
+    "ip": "192.0.2.14"
+  },
+  {
+    "mac": "00-00-5E-00-53-13",
+    "comment": "watch",
+    "hostname": "watch",
+    "enable": "on",
+    "ip": "192.0.2.20"
+  },
+  {
+    "mac": "00-00-5E-00-53-0C",
+    "comment": "bulb-b",
+    "hostname": "bulb-b",
+    "enable": "on",
+    "ip": "192.0.2.13"
+  },
+  {
+    "mac": "00-00-5E-00-53-08",
+    "comment": "camera",
+    "hostname": "camera",
+    "enable": "on",
+    "ip": "192.0.2.9"
+  },
+  {
+    "mac": "00-00-5E-00-53-14",
+    "comment": "router-2",
+    "hostname": "router-2",
+    "enable": "on",
+    "ip": "192.0.2.21"
+  }
+]

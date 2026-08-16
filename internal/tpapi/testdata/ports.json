@@ -1,0 +1,33 @@
+[
+  {
+    "duplex": "FULL",
+    "name": "wanlan1g",
+    "speed": 1000,
+    "status": "connected",
+    "is_wan": true
+  },
+  {
+    "status": "unconnected",
+    "duplex": "",
+    "name": "lan1",
+    "speed": ""
+  },
+  {
+    "status": "unconnected",
+    "duplex": "",
+    "name": "lan2",
+    "speed": ""
+  },
+  {
+    "status": "unconnected",
+    "duplex": "",
+    "name": "lan3",
+    "speed": ""
+  },
+  {
+    "status": "connected",
+    "duplex": "FULL",
+    "name": "wanlan2g5",
+    "speed": 2500
+  }
+]

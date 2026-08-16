@@ -1,0 +1,24 @@
+# Publishes /metrics on the host, for a scraper that cannot join the monitoring
+# network — a production one, while the exporter runs on a workstation. Layer it
+# over the base file:
+#
+#     docker compose -f docker-compose.yml -f docker-compose.expose.yml up -d
+#
+# All interfaces, which is what the bare "9110:9110" means as well. The metrics
+# carry the network's MAC addresses, IP addresses, host names and ARP table, and
+# nothing here authenticates a scrape, so anyone who reaches this host can read
+# that map. "127.0.0.1:9110:9110" narrows it to a scraper on this host.
+services:
+  tplink-exporter:
+    ports:
+      - "0.0.0.0:9110:9110"
+
+networks:
+  # The scraper arrives through the published port, so nothing has to join the
+  # exporter here: compose makes this network itself instead of requiring
+  # `docker network create monitoring`. Its own name, so it coexists with a real
+  # monitoring network on the same host and `docker compose down` takes only
+  # what it made.
+  monitoring:
+    name: tplink-exporter-local
+    external: false

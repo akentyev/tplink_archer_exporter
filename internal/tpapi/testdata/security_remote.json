@@ -1,0 +1,8 @@
+{
+  "enable": "off",
+  "http_port": "80",
+  "https_port": "443",
+  "managers": "all",
+  "remote": false,
+  "web_address": "https://192.0.2.29:443"
+}
