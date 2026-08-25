@@ -93,6 +93,37 @@ func cleanEnv() []string {
 	return env
 }
 
+// One start names every fault it can see. Reporting the first and leaving costs
+// a restart to learn the second, which is what collecting them was against.
+func TestEveryConfigurationFaultIsNamedInOneRun(t *testing.T) {
+	cmd := exec.Command(goBuild(t))
+	cmd.Env = append(cleanEnv(), "TPLINK_INTERVAL=abc", "TPLINK_TIMEOUT=xyz", "TPLINK_LOG_LEVEL=nope")
+	var out, errs bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &errs
+
+	var exit *exec.ExitError
+	if err := cmd.Run(); !errors.As(err, &exit) {
+		t.Fatalf("two unparsable variables ended the run with %v, want a non-zero exit\nstderr: %s", err, errs.String())
+	} else if exit.ExitCode() != 1 {
+		t.Errorf("exit code %d, want 1", exit.ExitCode())
+	}
+
+	// Two unparsable variables, a bad log level, no host and no password: five
+	// faults found in three different places along the start-up path.
+	for _, want := range []string{
+		"TPLINK_INTERVAL", "TPLINK_TIMEOUT", "-log-level",
+		"router address is required", "password is required",
+	} {
+		if !strings.Contains(errs.String(), want) {
+			t.Errorf("stderr never names %q, so fixing what it does name costs a restart to learn the rest:\n%s",
+				want, errs.String())
+		}
+	}
+	if out.String() != "" {
+		t.Errorf("a failing start wrote %q to stdout", out.String())
+	}
+}
+
 // The seam with values in it: they reach the binary, they reach stdout, and
 // nothing else is written anywhere.
 func TestVersionFlagPrintsTheLinkedBuild(t *testing.T) {
