@@ -1,0 +1,26 @@
+# docker is absent on purpose: golang:1.26.6-alpine is pinned to go.mod's go
+# directive and must not move alone, and distroless:nonroot floats already.
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      go-modules:
+        patterns: ["*"]
+        # A major is the one bump that has to be read rather than merged green.
+        update-types: [minor, patch]
+    open-pull-requests-limit: 5
+
+  # Pinned to major tags, so only a major ever changes a ref: this group holds
+  # nothing unless a pin is made precise.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      actions:
+        patterns: ["*"]
+        update-types: [minor, patch]
+    open-pull-requests-limit: 2
