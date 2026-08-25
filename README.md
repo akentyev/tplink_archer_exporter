@@ -115,7 +115,8 @@ Outside a container the exporter binds `127.0.0.1:9110`, so serving the network 
 
 ### Configuration
 
-Every flag falls back to an environment variable, which is what the container uses; the flag wins when both are set.
+Every flag but `-version` falls back to an environment variable, which is what the container uses; the flag wins when
+both are set. `-version` asks a question rather than setting anything, so it has none.
 
 | flag                | env                       | default          | meaning                                          |
 |---------------------|---------------------------|------------------|--------------------------------------------------|
@@ -132,6 +133,7 @@ Every flag falls back to an environment variable, which is what the container us
 | `-session-cooldown` | `TPLINK_SESSION_COOLDOWN` | `5m`             | stay away once losing the session repeats        |
 | `-session-renew`    | `TPLINK_SESSION_RENEW`    | `30m`            | replace the session on a schedule; 0 disables it |
 | `-log-level`        | `TPLINK_LOG_LEVEL`        | `info`           | debug, info, warn, error                         |
+| `-version`          | —                         | —                | print the version and exit                       |
 | —                   | `TZ`                      | the host's       | the zone the router's wall clock is read in      |
 
 There is no `-password` flag on purpose: a flag is visible in `ps`. Only the trailing newline is stripped from either
@@ -147,7 +149,7 @@ so a repeated one is itself the signal.
 
 | line                               | level | means                                                                                                                |
 |------------------------------------|-------|----------------------------------------------------------------------------------------------------------------------|
-| `starting`                         | info  | the settings it resolved, password source included; never the password                                               |
+| `starting`                         | info  | the build, then the settings it resolved, password source included; never the password                               |
 | `endpoint stopped answering`       | warn  | one source failed, with its path and error. Once per outage, not per cycle                                           |
 | `endpoint answering again`         | info  | that source came back                                                                                                |
 | `most of the cycle did not answer` | warn  | over half the sources failed at once — usually the session gone mid-cycle                                            |
@@ -201,6 +203,7 @@ These describe the exporter rather than the router:
 
 | metric                                 |                                                                                               |
 |----------------------------------------|-----------------------------------------------------------------------------------------------|
+| `tplink_exporter_build_info`           | always 1; `version`, `revision` and `go_version` say which build is running                   |
 | `tplink_up`                            | 1 when the last poll reached the router                                                       |
 | `tplink_session_blocked`               | 1 when the web UI is presumed busy: a refused login, or staying away after losing the session |
 | `tplink_session_lost_total`            | cycles that ended with the session gone                                                       |

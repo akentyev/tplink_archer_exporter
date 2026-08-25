@@ -24,7 +24,9 @@ import (
 
 // flagSpec is one row of that table. def is the documented default, "—" read as
 // the zero value. arg and envArg are the same field set two ways, with three
-// distinct values per row so precedence and cross-wiring both show.
+// distinct values per row so precedence and cross-wiring both show. An empty env
+// is a dash in README's env column: the row has no envArg and no envWant, and the
+// fallback test asserts the variable it would have been named after is ignored.
 type flagSpec struct {
 	flag    string
 	env     string
@@ -99,6 +101,12 @@ var flagTable = []flagSpec{
 		flag: "session-renew", env: "TPLINK_SESSION_RENEW", field: "SessionRenew", def: 30 * time.Minute,
 		arg: "21m", want: 21 * time.Minute,
 		envArg: "40m", envWant: 40 * time.Minute,
+	},
+	// -version has no environment variable: it is a question to the binary,
+	// answered and gone, not a setting a container carries.
+	{
+		flag: "version", env: "", field: "Version", def: false,
+		arg: "true", want: true,
 	},
 }
 
@@ -210,6 +218,24 @@ func TestBindFlagsEnvFallbackAndFlagPrecedence(t *testing.T) {
 	for _, spec := range flagTable {
 		t.Run(spec.flag, func(t *testing.T) {
 			clearEnv(t)
+			// A dash in README's env column is a claim to check, not a reason to
+			// skip: the flag has to ignore the variable it would have been named
+			// after. Skipping would excuse a row that simply lost its env.
+			if spec.env == "" {
+				absent := "TPLINK_" + strings.ToUpper(strings.ReplaceAll(spec.flag, "-", "_"))
+				t.Setenv(absent, spec.arg)
+
+				fs, o, e := bind(t)
+				parse(t, fs)
+				if got := field(t, o, spec.field); got != spec.def {
+					t.Errorf("%s=%s left options.%s at %v, want the default %v: README documents no variable for -%s",
+						absent, spec.arg, spec.field, got, spec.def, spec.flag)
+				}
+				if len(e.errs) != 0 {
+					t.Errorf("declaring the flags recorded %v", e.errs)
+				}
+				return
+			}
 			t.Setenv(spec.env, spec.envArg)
 
 			fs, o, e := bind(t)
@@ -259,6 +285,9 @@ func fullOptions() *options {
 		MaxBackoff:      12 * time.Minute,
 		SessionRenew:    21 * time.Minute,
 		SessionCooldown: 7 * time.Minute,
+		// Not a poller setting; set because assertDistinct reads a zero field as
+		// an assignment that was dropped.
+		Version: true,
 	}
 }
 
@@ -318,7 +347,9 @@ func TestPollerConfigKeepsSessionRenewOff(t *testing.T) {
 	}
 }
 
-// assertDistinct keeps the input to pollerConfig honest.
+// assertDistinct keeps the input to pollerConfig honest. A bool has one
+// non-zero value, so the second bool ever added to options fails here as a
+// swap of the first: widen the check then rather than weaken it.
 func assertDistinct(t *testing.T, o *options) {
 	t.Helper()
 	v := reflect.ValueOf(*o)
@@ -335,5 +366,24 @@ func assertDistinct(t *testing.T, o *options) {
 			continue
 		}
 		seen[got.Interface()] = f.Name
+	}
+}
+
+// README's log table says the starting line leads with the build. It is the one
+// place the build reaches the log, and a container that never gets past start-up
+// is read from the top.
+func TestStartupAttrsLeadWithTheBuild(t *testing.T) {
+	attrs := startupAttrs(fullOptions(),
+		exporter.BuildInfo{Version: "2026.8.0", Revision: "1a2b3c4", GoVersion: "go1.26.6"},
+		"http://192.0.2.1")
+
+	if len(attrs)%2 != 0 {
+		t.Fatalf("startupAttrs returned %d values; slog reads them as key/value pairs", len(attrs))
+	}
+	want := []any{"version", "2026.8.0", "revision", "1a2b3c4", "host", "http://192.0.2.1"}
+	for i, w := range want {
+		if attrs[i] != w {
+			t.Errorf("attribute %d is %v, want %v", i, attrs[i], w)
+		}
 	}
 }

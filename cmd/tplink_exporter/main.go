@@ -8,6 +8,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"html"
 	"log/slog"
 	"net/http"
 	"os"
@@ -37,11 +38,29 @@ const (
 	staleAfter = 5
 )
 
+// -X sets these at link time; go run and a plain go build leave the defaults.
+var (
+	version  = "dev"
+	revision = "unknown"
+)
+
+func buildInfo() exporter.BuildInfo { return exporter.NewBuildInfo(version, revision) }
+
+// buildLine is what -version prints and what the landing page shows, so the two
+// cannot disagree. BuildInfo.String normalizes, so neither can print a gap.
+func buildLine(b exporter.BuildInfo) string { return "tplink_exporter " + b.String() }
+
 func main() {
 	e := &env{}
 	o := bindFlags(flag.CommandLine, e)
 	flag.Usage = usage
 	flag.Parse()
+
+	build := buildInfo()
+	if o.Version {
+		fmt.Println(buildLine(build))
+		return
+	}
 
 	for _, err := range e.errs {
 		fatalf("%v", err)
@@ -71,6 +90,7 @@ func main() {
 	if o.MaxBackoff < o.MinBackoff {
 		fatalf("-max-backoff (%s) is below -min-backoff (%s)", o.MaxBackoff, o.MinBackoff)
 	}
+
 	if o.Interval < minInterval {
 		slog.Warn("poll interval is below the floor for this hardware; the router serves one web session and shares it with whoever opens the UI",
 			"interval", o.Interval, "floor", minInterval)
@@ -87,16 +107,12 @@ func main() {
 
 	reg := prometheus.NewRegistry()
 	reg.MustRegister(
-		exporter.NewCollector(poller, staleAfter*o.Interval),
+		exporter.NewCollector(poller, staleAfter*o.Interval, build),
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 	)
 
-	slog.Info("starting",
-		"host", client.Host, "user", o.User, "password_from", passwordSource(o.PasswordFile),
-		"listen", o.Listen, "interval", o.Interval, "timeout", o.Timeout,
-		"request_timeout", o.RequestTimeout, "min_backoff", o.MinBackoff, "max_backoff", o.MaxBackoff,
-		"session_cooldown", o.SessionCooldown, "session_renew", o.SessionRenew)
+	slog.Info("starting", startupAttrs(o, build, client.Host)...)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -115,7 +131,7 @@ func main() {
 		ErrorLog:      logAdapter{},
 		Registry:      reg, // counts scrape errors instead of only logging them
 	}))
-	mux.HandleFunc("GET /{$}", landing(o.Interval))
+	mux.HandleFunc("GET /{$}", landing(o.Interval, build))
 
 	srv := &http.Server{
 		Addr:              o.Listen,
@@ -173,6 +189,8 @@ type options struct {
 	// in later.
 	SessionRenew    time.Duration
 	SessionCooldown time.Duration
+	// Version configures nothing: it is answered and the process is gone.
+	Version bool
 }
 
 // bindFlags declares every flag on fs, parsing straight into the returned
@@ -208,6 +226,9 @@ func bindFlags(fs *flag.FlagSet, e *env) *options {
 		"how long to stay away once losing the session starts repeating (env TPLINK_SESSION_COOLDOWN)")
 	fs.StringVar(&o.LogLevel, "log-level", e.str("TPLINK_LOG_LEVEL", "info"),
 		"debug, info, warn or error (env TPLINK_LOG_LEVEL)")
+	// No environment variable behind this one: a container carrying it would
+	// print and exit instead of polling.
+	fs.BoolVar(&o.Version, "version", false, "print the version and exit")
 	return o
 }
 
@@ -223,8 +244,22 @@ func pollerConfig(o *options) exporter.Config {
 	}
 }
 
-// landing serves one paragraph at / with a link to /metrics.
-func landing(interval time.Duration) http.HandlerFunc {
+// startupAttrs is what the starting line carries. It lives out here because main
+// is the seam the package tests cannot reach, and the build leads because a
+// crash-looping container is read from the top of its log.
+func startupAttrs(o *options, b exporter.BuildInfo, host string) []any {
+	return []any{
+		"version", b.Version, "revision", b.Revision,
+		"host", host, "user", o.User, "password_from", passwordSource(o.PasswordFile),
+		"listen", o.Listen, "interval", o.Interval, "timeout", o.Timeout,
+		"request_timeout", o.RequestTimeout, "min_backoff", o.MinBackoff, "max_backoff", o.MaxBackoff,
+		"session_cooldown", o.SessionCooldown, "session_renew", o.SessionRenew,
+	}
+}
+
+// landing serves two paragraphs at / , one linking /metrics. The build's strings
+// come from build arguments, so they are escaped.
+func landing(interval time.Duration, b exporter.BuildInfo) http.HandlerFunc {
 	page := fmt.Sprintf(`<!doctype html>
 <html lang="en">
 <head><meta charset="utf-8"><title>tplink_archer_exporter</title></head>
@@ -235,9 +270,10 @@ The router serves a single web session, so it is polled every %s on the exporter
 own ticker and a scrape reads the last snapshot rather than the device. The age of
 that snapshot is <code>time() - tplink_snapshot_timestamp_seconds</code>; when the
 router's UI holds the session, <code>tplink_session_blocked</code> is 1.</p>
+<p>%s</p>
 </body>
 </html>
-`, interval)
+`, interval, html.EscapeString(buildLine(b)))
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write([]byte(page))
@@ -321,8 +357,9 @@ func usage() {
 
 Usage: %s -host 192.168.0.1
 
-Every flag falls back to the environment variable named in its description, and
-the defaults below already show what those variables resolved to. The password
+Every flag that names an environment variable in its description falls back to
+it, and the defaults below show what those variables resolved to — unless one
+failed to parse, which is reported at start-up rather than here. The password
 has no flag, since a flag is visible in ps: it comes from TPLINK_PASSWORD, or
 from the file named by -password-file for a Docker secret.
 
