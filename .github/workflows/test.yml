@@ -1,0 +1,65 @@
+name: test
+
+# workflow_call so another workflow can require these checks before its own work.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_call:
+
+permissions:
+  contents: read
+
+# Spelled out rather than built from github.workflow: inside a called workflow
+# that context holds the caller's name, and this would cancel the caller's group.
+concurrency:
+  group: tests-${{ github.ref }}
+  # github.ref is refs/heads/main for every push there, so cancelling would leave
+  # the first of two close merges without a green check.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # Defaults to true, and the steps below run third-party programs here.
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: gofmt
+        run: |
+          files=$(gofmt -l .)
+          if [ -n "$files" ]; then
+            echo "not gofmt'd:"
+            echo "$files"
+            exit 1
+          fi
+
+      - name: tidy
+        run: go mod tidy -diff
+
+      - name: vet
+        run: go vet ./...
+
+      # v0.6.1 is the module version of the release named 2025.1.1, which is a
+      # git tag and can move.
+      - name: staticcheck
+        run: go run honnef.co/go/tools/cmd/staticcheck@v0.6.1 ./...
+
+      - name: test
+        run: go test ./... -race -shuffle=on
+
+      - name: build
+        run: go build ./...
+
+      # Depends on nothing above it, and the pull request adding a workflow is
+      # the likeliest to have a red test.
+      - name: actionlint
+        if: ${{ !cancelled() }}
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 -color

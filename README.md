@@ -448,8 +448,13 @@ reason.
 ## Tests
 
 ```bash
-go test ./...
+go test ./... -race -shuffle=on
 ```
+
+Both flags are load-bearing: the poller runs in a goroutine and part of the suite drives it on `testing/synctest` with
+fake clocks, and the logging tests replace `slog.SetDefault` globally, so the order they run in has to stay irrelevant.
+GitHub Actions runs the same line on every pull request, beside `gofmt`, `go vet`, `go mod tidy -diff`, `staticcheck`,
+`go build` and `actionlint`.
 
 `client_test.go` stands up a fake router implementing the server half of the scheme: it parses the login signature
 (RSA/OAEP), takes the AES key out of it, checks `s = seq + len(data)` and the credential hash, then verifies the HMAC on
