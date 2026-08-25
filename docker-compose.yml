@@ -2,14 +2,20 @@
 # no extra capabilities.
 #
 # Nothing is published: the exporter is reached over the monitoring network as
-# tplink-exporter:9110, by anything joined to it. To publish it on the host as
-# well, add docker-compose.expose.yml:
+# tplink-exporter:9110, by anything joined to it. Two overlays, either or both,
+# this file first — a later -f wins:
 #
-#     docker compose -f docker-compose.yml -f docker-compose.expose.yml up -d
+#     -f docker-compose.expose.yml   publish the port on the host
+#     -f docker-compose.build.yml    build here from the checkout, never pull
 services:
   tplink-exporter:
-    build: .
-    image: tplink_archer_exporter:latest
+    # Which build is running: tplink_exporter_build_info, or
+    # `docker run --rm --pull=always <image> -version`.
+    #
+    # `up -d` does not re-resolve a tag already pulled — upgrade with
+    # `docker compose pull`. Pin a version to record it in git; the image tag
+    # drops the `v`, git v2026.8.0 is :2026.8.0.
+    image: ghcr.io/akentyev/tplink_archer_exporter:latest
     container_name: tplink-exporter
     restart: unless-stopped
     networks: [monitoring]

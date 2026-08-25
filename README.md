@@ -25,16 +25,18 @@ often as it likes.
 
 ```bash
 printf '%s' 'router-password' > tplink_password   # gitignored
-docker build -t tplink_archer_exporter .
 docker network create monitoring
 docker run -d --name tplink-exporter --network monitoring \
+  -p 127.0.0.1:9110:9110 \
   -e TPLINK_HOST=192.168.0.1 -e TPLINK_PASSWORD_FILE=/run/secrets/pw \
   -v "$PWD/tplink_password:/run/secrets/pw:ro" \
-  tplink_archer_exporter
+  ghcr.io/akentyev/tplink_archer_exporter:latest
 ```
 
 The password goes in through a file because `-e TPLINK_PASSWORD` lands in
-`docker inspect` and in `docker compose config` output.
+`docker inspect` and in `docker compose config` output. The `-p` is there only
+so the `curl` below reaches it from this host; the deployment further down
+publishes nothing.
 
 It is up within one poll:
 
@@ -46,7 +48,24 @@ curl -s localhost:9110/metrics | grep '^tplink_up'  # 1 once a poll has landed
 `tplink_up 0` with `tplink_session_blocked 1` means a browser holds the router's session, not that anything is broken —
 see [One session](#one-session).
 
-`docker-compose.yml` is the same with a restart policy and a Docker secret. Without a container:
+The published image carries `linux/amd64` and `linux/arm64`. Asking one which
+build it is needs no configuration — no router, no password:
+
+```bash
+docker run --rm --pull=always ghcr.io/akentyev/tplink_archer_exporter:latest -version
+```
+
+Without `--pull=always` the answer is whatever `:latest` meant when this host
+first pulled it.
+
+Building it here instead — for a change that is not published yet — is
+`docker build -t tplink_archer_exporter:local .`, one architecture, the
+builder's; `docker-compose.build.yml` does the same within compose.
+
+`docker-compose.yml` is the same with a restart policy and a Docker secret; the
+container name is the same one, so `docker rm -f tplink-exporter` first. It
+tracks `:latest`, which `up -d` alone does not re-resolve — upgrading is
+`docker compose pull && docker compose up -d`. Without a container:
 
 ```bash
 go build -o bin/tplink_exporter ./cmd/tplink_exporter

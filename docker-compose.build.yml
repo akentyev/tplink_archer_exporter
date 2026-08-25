@@ -1,0 +1,20 @@
+# Builds from this checkout instead of pulling the published image.
+#
+#     docker compose -f docker-compose.yml -f docker-compose.expose.yml \
+#         -f docker-compose.build.yml up -d
+#
+# Base file first: a later -f wins, and the reverse order builds under the
+# published tag. Expose is in the line because this file inherits the base
+# file's external `monitoring`; without it, `docker network create monitoring`
+# first.
+#
+# Its own name, so a local build never sits under a published tag. No VERSION
+# or REVISION, so the exporter reports dev/unknown. One architecture, the
+# builder's; the published image is multi-arch.
+services:
+  tplink-exporter:
+    build: .
+    image: tplink_archer_exporter:local
+    # Builds on every up. Without it compose reuses a stale :local and asks
+    # Docker Hub for the unqualified tag.
+    pull_policy: build
