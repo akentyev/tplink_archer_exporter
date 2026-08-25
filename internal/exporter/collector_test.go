@@ -215,8 +215,10 @@ tplink_snapshot_timestamp_seconds 1786802858
 tplink_up 1
 `
 
-// healthMetrics is what a scrape carries whatever the poller found: the state of
-// the exporter, never a reading off the router.
+// healthMetrics is the exporter's own state as healthGolden spells it, never a
+// reading off the router. tplink_exporter_build_info belongs beside these and is
+// missing on purpose: its go_version comes from the toolchain, so buildInfoGolden
+// renders it instead of a const holding it.
 var healthMetrics = []string{
 	"tplink_up", "tplink_session_blocked", "tplink_scrape_duration_seconds",
 	"tplink_scrape_errors_total", "tplink_login_total", "tplink_login_failed_total",
@@ -451,6 +453,7 @@ type metricGroup struct{ name, want string }
 // in exactly one group; TestGoldensCoverEveryDescriptor holds that true.
 func metricGroups() []metricGroup {
 	return []metricGroup{
+		{"build", buildInfoGolden(testBuild.Version, testBuild.Revision)},
 		{"health", healthGolden},
 		{"router", routerGolden},
 		{"performance", performanceGolden},
@@ -472,15 +475,10 @@ func gathererFor(t *testing.T, st State) prometheus.Gatherer {
 	return gathererWithMaxAge(t, st, 0)
 }
 
-// gathererWithMaxAge uses a pedantic registry, which holds Collect to what
-// Describe announced and refuses two series that share a name and a label set.
+// gathererWithMaxAge registers a collector over st reporting testBuild.
 func gathererWithMaxAge(t *testing.T, st State, maxAge time.Duration) prometheus.Gatherer {
 	t.Helper()
-	reg := prometheus.NewPedanticRegistry()
-	if err := reg.Register(NewCollector(&stubSource{st: st}, maxAge)); err != nil {
-		t.Fatalf("a registry refused the collector: %v", err)
-	}
-	return reg
+	return gathererWithBuild(t, st, maxAge, testBuild)
 }
 
 // goldenNames lists the metrics a golden covers, read from its TYPE lines, so
@@ -611,7 +609,7 @@ func describedMetrics(t *testing.T) map[string]metricDesc {
 	t.Helper()
 	ch := make(chan *prometheus.Desc, 64)
 	go func() {
-		NewCollector(&stubSource{}, 0).Describe(ch)
+		NewCollector(&stubSource{}, 0, testBuild).Describe(ch)
 		close(ch)
 	}()
 
@@ -786,9 +784,11 @@ tplink_session_lost_total 1
 tplink_up 0
 `
 
-	// No filter: this is the whole scrape, so anything else is a failure.
-	if err := testutil.GatherAndCompare(gathererFor(t, st), strings.NewReader(want)); err != nil {
-		t.Errorf("a scrape before the first successful cycle is not health alone:\n%v", err)
+	// No filter: this is the whole scrape, so anything else is a failure. The
+	// build is in it because it is served whatever the poller found.
+	whole := want + buildInfoGolden(testBuild.Version, testBuild.Revision)
+	if err := testutil.GatherAndCompare(gathererFor(t, st), strings.NewReader(whole)); err != nil {
+		t.Errorf("a scrape before the first successful cycle is not health and the build alone:\n%v", err)
 	}
 }
 
@@ -825,9 +825,10 @@ func TestSnapshotPastMaxAgeIsNotServed(t *testing.T) {
 					want.WriteString(goldenFamily(t, healthGolden, name))
 				}
 				want.WriteString(stamp)
+				want.WriteString(buildInfoGolden(testBuild.Version, testBuild.Revision))
 				if err := testutil.GatherAndCompare(g, strings.NewReader(want.String())); err != nil {
-					t.Errorf("%s: a snapshot past maxAge leaves health and its timestamp, nothing else:\n%v",
-						tc.name, err)
+					t.Errorf("%s: a snapshot past maxAge leaves health, its timestamp and the build, "+
+						"nothing else:\n%v", tc.name, err)
 				}
 				return
 			}
@@ -1318,7 +1319,8 @@ tplink_up 1
 tplink_upnp_enabled 1
 `
 
-	if err := testutil.GatherAndCompare(gathererFor(t, st), strings.NewReader(want)); err != nil {
+	whole := want + buildInfoGolden(testBuild.Version, testBuild.Revision)
+	if err := testutil.GatherAndCompare(gathererFor(t, st), strings.NewReader(whole)); err != nil {
 		t.Errorf("a snapshot whose sections are partly nil is not exposed as what it holds:\n%v", err)
 	}
 }
@@ -1436,7 +1438,7 @@ func TestVPNUserAccessIsPermissionNotASession(t *testing.T) {
 func TestScrapeReadsStateOnce(t *testing.T) {
 	src := &stubSource{st: fullState()}
 	reg := prometheus.NewPedanticRegistry()
-	if err := reg.Register(NewCollector(src, 0)); err != nil {
+	if err := reg.Register(NewCollector(src, 0, testBuild)); err != nil {
 		t.Fatalf("a registry refused the collector: %v", err)
 	}
 

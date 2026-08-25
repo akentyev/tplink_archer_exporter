@@ -14,6 +14,7 @@ import (
 // alerts that outlive this code.
 
 var (
+	descBuildInfo        = prometheus.NewDesc("tplink_exporter_build_info", "The build this exporter is running; the value is always 1.", []string{"version", "revision", "go_version"}, nil)
 	descUp               = prometheus.NewDesc("tplink_up", "1 when the last poll reached the router.", nil, nil)
 	descSessionBlocked   = prometheus.NewDesc("tplink_session_blocked", "1 when the router's single web session is held by someone else.", nil, nil)
 	descScrapeDuration   = prometheus.NewDesc("tplink_scrape_duration_seconds", "Duration of the last poll cycle.", nil, nil)
@@ -84,8 +85,9 @@ var (
 
 // descriptors is every Desc Collect can emit; Describe announces exactly these.
 var descriptors = []*prometheus.Desc{
-	descUp, descSessionBlocked, descScrapeDuration, descScrapeErrors, descLogins,
-	descLoginFailures, descSessionsLost, descLoginsSuppressed, descSnapshotTime, descFailedSources,
+	descBuildInfo, descUp, descSessionBlocked, descScrapeDuration, descScrapeErrors,
+	descLogins, descLoginFailures, descSessionsLost, descLoginsSuppressed,
+	descSnapshotTime, descFailedSources,
 	descFirmware, descWANUptime, descWANStatus, descWANStatusInfo, descWANSpeed, descWANSpeedAt,
 	descCPU, descCPUCore, descCPUCores, descMemory, descRouterClock, descRouterClockInfo,
 	descPortLink, descPortSpeed, descPortInfo,
@@ -109,13 +111,16 @@ type StateSource interface {
 type Collector struct {
 	src    StateSource
 	maxAge time.Duration
+	build  BuildInfo
 }
 
 // NewCollector returns a Collector that reads src once per scrape. Past maxAge
 // a snapshot stops being served and only the exporter's own health remains, so
 // a frozen reading cannot be mistaken for a current one; zero means no limit.
-func NewCollector(src StateSource, maxAge time.Duration) *Collector {
-	return &Collector{src: src, maxAge: maxAge}
+// build is normalized here, so a zero BuildInfo still names a build rather than
+// publishing empty labels.
+func NewCollector(src StateSource, maxAge time.Duration, build BuildInfo) *Collector {
+	return &Collector{src: src, maxAge: maxAge, build: build.normalized()}
 }
 
 // Describe implements prometheus.Collector.
@@ -129,7 +134,7 @@ func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
 // cannot disagree with the one beside it.
 func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 	st := c.src.State()
-	collectHealth(ch, st)
+	collectHealth(ch, st, c.build)
 	snap := st.Snapshot
 	if snap == nil {
 		return
@@ -160,7 +165,10 @@ func collectNeighbours(ch chan<- prometheus.Metric, snap *Snapshot) {
 	}
 }
 
-func collectHealth(ch chan<- prometheus.Metric, st State) {
+func collectHealth(ch chan<- prometheus.Metric, st State, b BuildInfo) {
+	// Collect returns early on a missing snapshot and on a stale one, both after
+	// this call, so the build outlives the readings.
+	gauge(ch, descBuildInfo, 1, b.Version, b.Revision, b.GoVersion)
 	gauge(ch, descUp, b2f(st.Up))
 	gauge(ch, descSessionBlocked, b2f(st.SessionBlocked))
 	gauge(ch, descScrapeDuration, st.PollDuration.Seconds())
