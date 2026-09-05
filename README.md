@@ -147,7 +147,7 @@ both are set. `-version` asks a question rather than setting anything, so it has
 | `-interval`         | `TPLINK_INTERVAL`         | `60s`            | poll period                                      |
 | `-timeout`          | `TPLINK_TIMEOUT`          | `30s`            | bounds one whole poll cycle                      |
 | `-request-timeout`  | `TPLINK_REQUEST_TIMEOUT`  | `10s`            | per HTTP request                                 |
-| `-min-backoff`      | `TPLINK_MIN_BACKOFF`      | `1m`             | first wait after a failed cycle                  |
+| `-min-backoff`      | `TPLINK_MIN_BACKOFF`      | `1m`             | first wait before a failed login is tried again  |
 | `-max-backoff`      | `TPLINK_MAX_BACKOFF`      | `15m`            | ceiling for the backoff and the cooldown         |
 | `-session-cooldown` | `TPLINK_SESSION_COOLDOWN` | `5m`             | stay away once losing the session repeats        |
 | `-session-renew`    | `TPLINK_SESSION_RENEW`    | `30m`            | replace the session on a schedule; 0 disables it |
@@ -177,7 +177,7 @@ so a repeated one is itself the signal.
 | `endpoint answering again`         | info  | that source came back                                                                                                |
 | `most of the cycle did not answer` | warn  | over half the sources failed at once — usually the session gone mid-cycle                                            |
 | `login failed`                     | warn  | `session_blocked=true` means a browser holds the session; anything else is a wrong password or an unreachable router |
-| `not logging in`                   | info  | staying away on purpose: the cooldown after a taken session, or the hourly cap                                       |
+| `not logging in`                   | info  | staying away on purpose: the cooldown after a taken session, the hourly cap, or the backoff                          |
 | `the session was taken`            | warn  | someone logged in to the web UI                                                                                      |
 | `polling again`                    | info  | back after a spell of not polling. Once, on the first good cycle                                                     |
 | `session renewed`                  | info  | the scheduled replacement, every `-session-renew`                                                                    |
@@ -191,8 +191,9 @@ served.
 
 The AX80 serves **one** web session, and the exporter never takes it from you.
 `Force` stays false, so a browser holding the session gets a refused login here, not the other way round:
-`tplink_session_blocked` goes to 1 and the poller waits, doubling from `-min-backoff` to `-max-backoff` until the tab is
-closed or the router times it out.
+`tplink_session_blocked` goes to 1 and the login is retried on a delay doubling from `-min-backoff` to `-max-backoff`
+until the tab is closed or the router times it out. The cycle keeps the `-interval` rhythm meanwhile, so the wait is a
+login schedule and not a gap in the metrics.
 
 **Do not run it on the machine you browse the router from.** That protection is the firmware's, and the firmware defends
 a session against other *devices*: a login from the address that already holds one replaces it silently, with no
@@ -230,7 +231,7 @@ These describe the exporter rather than the router:
 | `tplink_up`                            | 1 when the last poll reached the router                                                       |
 | `tplink_session_blocked`               | 1 when the web UI is presumed busy: a refused login, or staying away after losing the session |
 | `tplink_session_lost_total`            | cycles that ended with the session gone                                                       |
-| `tplink_login_suppressed_total`        | logins held back by the cooldown or the hourly cap                                            |
+| `tplink_login_suppressed_total`        | logins held back by the cooldown, the hourly cap or the backoff                               |
 | `tplink_scrape_errors_total{endpoint}` | endpoint failures since start                                                                 |
 | `tplink_endpoints_failed`              | endpoints missing from the snapshot being served                                              |
 | `tplink_snapshot_timestamp_seconds`    | when the snapshot being served was taken                                                      |
@@ -281,16 +282,13 @@ matches nothing until it accounts for the scheme. `-push-label name=value`, repe
 **Alerting is not the same in push, because `tplink_up` still describes the router, not the exporter.** A dead
 exporter simply stops sending, so nothing ever reports `tplink_up 0` — there is no scrape to fail and no process to be
 missing from it. Watch the data instead: `time() - tplink_push_last_success_timestamp_seconds`, or
-`absent_over_time(tplink_up[...])` — and **size that window against `-max-backoff`, not against a few cycles**. A push
-rides the poller's cycle, and a login the router refused or never answered arms the poller's backoff, which replaces
-the interval rather than adding to it: at the defaults an unreachable router thins the sends out to one every 1, 2, 4,
-8 and then 15 minutes, for as long as it stays unreachable. A window a few cycles wide therefore fires on the router's
-outage rather than the exporter's, and `tplink_up 0` goes stale between the samples that still carry it; a window above
-`-max-backoff` — `20m` against the default `15m` — waits for a real silence. `tplink_session_blocked` rides the same
-backoff, since a browser holding the session is a refused login like any other; what keeps the `-interval` rhythm is the
-cooldown after a session taken from the exporter mid-cycle, and only that. The pull alert, `tplink_up == 0 unless
-tplink_session_blocked == 1`, still means exactly what it always meant — the router is unreachable — it just stops
-doubling as the exporter's own health check.
+`absent_over_time(tplink_up[...])` — and **size that window against a few `-interval`s**. A push rides the poller's
+cycle, and the cycle holds its period through an outage: a refused login, a router that never answered and a session
+someone else took all set when the next login is tried, never when the next cycle runs, so `tplink_up 0` and the error
+counters go out every interval for as long as it lasts. Three or four intervals is a window that sits out a slow cycle
+and still calls a silent exporter within minutes. The pull alert, `tplink_up == 0 unless tplink_session_blocked == 1`,
+still means exactly what it always meant — the router is unreachable — it just stops doubling as the exporter's own
+health check.
 
 A receiver that is down does not cost a cycle: up to `-push-buffer` snapshots (300 by default, five hours of history at
 the 60s default interval) wait in memory, oldest first, and go out with their **original** cycle timestamps once the

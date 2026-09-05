@@ -45,7 +45,7 @@ type State struct {
 	// SessionsLost counts cycles that ended with the session gone. Someone
 	// opening the web UI is the usual cause, but a cycle that reached nothing
 	// counts too. LoginsSuppressed counts the logins not attempted because of
-	// that, or because of the hourly cap.
+	// that, because of the hourly cap, or inside the backoff.
 	SessionsLost     uint64
 	LoginsSuppressed uint64
 
@@ -61,10 +61,11 @@ type Config struct {
 	// from the http.Client in tpapi.New.
 	Timeout time.Duration
 
-	// Backoff replaces the interval: the wait is max(Interval, backoff),
-	// doubling from MinBackoff to MaxBackoff, no jitter. Armed by any failed
-	// login and by a cycle that ran out of Timeout. A cycle where nothing
-	// answered is treated as a lost session instead; a partial one arms nothing.
+	// Backoff is when the next login is tried, max(Interval, backoff) after the
+	// cycle that failed, doubling from MinBackoff to MaxBackoff, no jitter. The
+	// cycle keeps the interval throughout. Armed by any failed login and by a
+	// cycle that ran out of Timeout. A cycle where nothing answered is treated as
+	// a lost session instead; a partial one arms nothing.
 	MinBackoff time.Duration
 	MaxBackoff time.Duration
 
@@ -131,7 +132,8 @@ type Poller struct {
 	loggedInAt   time.Time
 	backoff      time.Duration
 	cooldown     time.Duration // grows while losing the session keeps repeating
-	quietUntil   time.Time     // no login attempt before this
+	quietUntil   time.Time     // no login attempt before this, after a lost session
+	loginAfter   time.Time     // no login attempt before this, after a failed cycle
 	lossHistory  []time.Time   // sessions lost inside the last hour
 	loginHistory []time.Time   // attempts inside the last hour, for the cap
 
@@ -144,6 +146,7 @@ type Poller struct {
 const (
 	holdSessionTaken = "the session was taken; staying away so the web UI keeps it"
 	holdLoginCap     = "hourly login cap reached"
+	holdBackoff      = "backing off after a failed cycle"
 )
 
 // NewPoller does not connect; Run does.
@@ -245,7 +248,7 @@ func (p *Poller) cycle(ctx context.Context) (time.Duration, time.Time) {
 		p.polledOK = false
 		p.failing = nil
 		p.suppress(start, why == holdSessionTaken)
-		slog.Info("not logging in", "why", why, "retry_in", wait)
+		slog.Info("not logging in", "why", why, "next_cycle_in", wait)
 		return wait, start
 	}
 
@@ -253,10 +256,11 @@ func (p *Poller) cycle(ctx context.Context) (time.Duration, time.Time) {
 		p.polledOK = false
 		p.failing = nil
 		p.record(start, nil, 0, err, false)
-		wait := p.growBackoff()
-		slog.Warn("login failed", "err", err, "retry_in", wait,
+		retry := p.growBackoff()
+		p.loginAfter = start.Add(retry)
+		slog.Warn("login failed", "err", err, "retry_in", retry,
 			"session_blocked", errors.Is(err, tpapi.ErrSessionBusy))
-		return wait, start
+		return p.cfg.Interval, start
 	}
 
 	snap, gathered, err := p.poll(ctx)
@@ -294,9 +298,10 @@ func (p *Poller) cycle(ctx context.Context) (time.Duration, time.Time) {
 		p.loggedIn = false
 		p.failing = nil
 		p.record(start, snap, gathered, err, false)
-		wait := p.growBackoff()
-		slog.Warn("the cycle ran out of time", "err", err, "retry_in", wait)
-		return wait, publishedAt(snap, gathered, start)
+		retry := p.growBackoff()
+		p.loginAfter = start.Add(retry)
+		slog.Warn("the cycle ran out of time", "err", err, "retry_in", retry)
+		return p.cfg.Interval, publishedAt(snap, gathered, start)
 
 	default:
 		// Nothing answered, or the router said the session is gone. The firmware
@@ -321,8 +326,8 @@ func publishedAt(snap *Snapshot, gathered int, start time.Time) time.Time {
 }
 
 // holdOff reports how long to wait before the next cycle and why the login is
-// being held back; "" means go ahead. Inside a quiet spell it returns Interval
-// rather than what is left of it, so the cycle keeps its rhythm and counts.
+// being held back; "" means go ahead. A hold returns Interval rather than what
+// is left of it, so the cycle keeps its rhythm and counts.
 func (p *Poller) holdOff(now time.Time) (time.Duration, string) {
 	if p.loggedIn {
 		return 0, ""
@@ -334,6 +339,12 @@ func (p *Poller) holdOff(now time.Time) (time.Duration, string) {
 		// Interval, not the remaining hour: holdOff is what enforces the cap, and
 		// sleeping the window out in one piece would freeze the counters with it.
 		return p.cfg.Interval, holdLoginCap
+	}
+	// The logged reason is the first that applies, and this is the least serious
+	// of the three: the cooldown is a person at the web UI, the cap the
+	// firmware's two-hour lock, this only a router that did not answer.
+	if now.Before(p.loginAfter) {
+		return p.cfg.Interval, holdBackoff
 	}
 	return 0, ""
 }
@@ -494,6 +505,8 @@ func (p *Poller) logout(ctx context.Context) error {
 	return err
 }
 
+// growBackoff doubles the wait and returns it: how long after the start of the
+// cycle that failed the next login may be tried.
 func (p *Poller) growBackoff() time.Duration {
 	switch {
 	case p.backoff == 0:
