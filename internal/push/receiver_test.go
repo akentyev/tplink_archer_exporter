@@ -87,6 +87,7 @@ func (r *fakeReceiver) handle(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/x-protobuf")
+	w.WriteHeader(code)
 	w.Write(resp)
 }
 
@@ -104,17 +105,20 @@ func (r *fakeReceiver) requests() []*metricspb.ResourceMetrics {
 }
 
 // respond changes the status code answered to every request from here on and
-// cancels a pending answerThen. A delay stands until delay clears it.
+// replaces the whole answering plan: a pending answerThen and any delay go
+// with it.
 func (r *fakeReceiver) respond(code int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.code = code
 	r.firstN, r.thenCode = 0, 0
+	r.pause = 0
 }
 
 // answerThen answers first to the next n requests and then to every request
 // after them: how a test breaks a drain in the middle rather than at its
-// head, or refuses what is buffered while taking what is fresh.
+// head, or refuses what is buffered while taking what is fresh. A zero then
+// is the off switch: first stands for every request, n and all.
 func (r *fakeReceiver) answerThen(n, first, then int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -260,6 +264,44 @@ func TestFakeReceiverRespond(t *testing.T) {
 	r.respond(http.StatusOK)
 	if got, want := post(t, r.url(), req).StatusCode, http.StatusOK; got != want {
 		t.Errorf("status after respond(200) = %d, want %d", got, want)
+	}
+}
+
+// handle answers with the code it was given: a 2xx other than 200 accepts the
+// batch and says so.
+func TestFakeReceiverAnswersTheCodeItWasGiven(t *testing.T) {
+	r := newFakeReceiver(t)
+	req := &collectorpb.ExportMetricsServiceRequest{
+		ResourceMetrics: []*metricspb.ResourceMetrics{
+			gaugeMetric("tplink_up", 1, 1, map[string]string{"job": "tplink_exporter"}),
+		},
+	}
+
+	r.respond(http.StatusAccepted)
+	if got, want := post(t, r.url(), req).StatusCode, http.StatusAccepted; got != want {
+		t.Errorf("status after respond(202) = %d, want %d", got, want)
+	}
+	if got := r.requests(); len(got) != 1 {
+		t.Errorf("requests() after a 202 = %d entries, want 1: a 2xx is an accepted batch", len(got))
+	}
+}
+
+// respond replaces the whole answering plan, the delay included. A pause left
+// behind spends a later deadline for a reason nothing nearby set.
+func TestFakeReceiverRespondClearsTheDelay(t *testing.T) {
+	r := newFakeReceiver(t)
+	req := &collectorpb.ExportMetricsServiceRequest{}
+
+	r.answerThen(1, http.StatusServiceUnavailable, http.StatusOK)
+	r.delay(500 * time.Millisecond)
+	r.respond(http.StatusOK)
+
+	start := time.Now()
+	if got, want := post(t, r.url(), req).StatusCode, http.StatusOK; got != want {
+		t.Errorf("status after respond(200) = %d, want %d: respond cancels a pending answerThen", got, want)
+	}
+	if elapsed := time.Since(start); elapsed > 250*time.Millisecond {
+		t.Errorf("the request took %s, want none of the 500ms delay respond cleared", elapsed)
 	}
 }
 

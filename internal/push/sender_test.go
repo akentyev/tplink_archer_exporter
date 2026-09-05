@@ -340,6 +340,51 @@ func TestSenderPushSendsWhatAPartialGatherLeaves(t *testing.T) {
 	}
 }
 
+// Both readers are wrapped, not the snapshot alone: the bridge drops a
+// gatherer's whole output on any error, so an unwrapped process reader sends no
+// process body at all. Nothing in that registry produces a duplicate; this
+// collector stands in for any gather error.
+func TestSenderPushSendsTheProcessBodyAPartialGatherLeaves(t *testing.T) {
+	logs := captureLog(t, slog.LevelInfo)
+	rcv := newFakeReceiver(t)
+
+	process := prometheus.NewRegistry()
+	goroutines := prometheus.NewGauge(prometheus.GaugeOpts{Name: "process_test_goroutines", Help: "test"})
+	goroutines.Set(7)
+	if err := process.Register(goroutines); err != nil {
+		t.Fatalf("register process_test_goroutines: %v", err)
+	}
+	dup := &duplicateCollector{desc: prometheus.NewDesc("process_test_dup_info", "test", []string{"mac"}, nil)}
+	if err := process.Register(dup); err != nil {
+		t.Fatalf("register process_test_dup_info: %v", err)
+	}
+	if _, err := process.Gather(); err == nil {
+		t.Fatal("Gather() reported no error; the registry under test has to produce one")
+	}
+
+	s, err := New(testConfig(rcv.url(), nil), snapshotRegistry(t), process)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if err := s.Push(context.Background(), time.Now()); err != nil {
+		t.Fatalf("Push: %v", err)
+	}
+
+	if got, want := rcv.calls(), 2; got != want {
+		t.Fatalf("calls() = %d, want %d: the process body travels beside the snapshot", got, want)
+	}
+	if got := len(datapointsOf(rcv.requests(), "process_test_goroutines")); got != 1 {
+		t.Errorf("process_test_goroutines data points = %d, want 1: the healthy series travels beside the broken one", got)
+	}
+	if got := len(datapointsOf(rcv.requests(), "process_test_dup_info")); got != 1 {
+		t.Errorf("process_test_dup_info data points = %d, want the 1 the registry kept", got)
+	}
+	if got := logs.count("push gather"); got != 1 {
+		t.Errorf("the gather error reached slog %d times, want 1; the log is the only record of it\n%s", got, logs)
+	}
+}
+
 // The exporter's own retry is disabled -- one refusal is one call, not the
 // five a minute-long backoff would produce.
 func TestSenderPushDoesNotRetry(t *testing.T) {
@@ -1372,6 +1417,7 @@ func TestSenderLogsEveryRefusal(t *testing.T) {
 // The drain Shutdown waits for may be one another goroutine holds; the token
 // is given up when ctx ends rather than waiting the drain out.
 func TestSenderShutdownDoesNotWaitOutADrainInFlight(t *testing.T) {
+	logs := captureLog(t, slog.LevelInfo)
 	rcv := newFakeReceiver(t)
 	s := failureSender(t, rcv, 0)
 	ts := bufferBatches(t, s, rcv, 6)
@@ -1399,5 +1445,13 @@ func TestSenderShutdownDoesNotWaitOutADrainInFlight(t *testing.T) {
 	}
 	if want := 400 * time.Millisecond; elapsed > want {
 		t.Errorf("Shutdown took %s, want under %s rather than the drain's remaining 600ms", elapsed, want)
+	}
+	// A Shutdown that never held the token counts what it left after the close,
+	// not before; without that recount the loss goes unreported.
+	if got := logs.count("push buffer lost at shutdown"); got != 1 {
+		t.Errorf("loss lines = %d, want 1 for the batches the drain still held:\n%s", got, logs)
+	}
+	if strings.Contains(logs.String(), "err=<nil>") {
+		t.Errorf("a line carries err=<nil>; only a stopped drain leaves batches, and the loss line has to name it:\n%s", logs)
 	}
 }

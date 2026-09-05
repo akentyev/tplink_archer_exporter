@@ -298,7 +298,7 @@ func bindFlags(fs *flag.FlagSet, e *env) *options {
 	fs.DurationVar(&o.RequestTimeout, "request-timeout", e.dur("TPLINK_REQUEST_TIMEOUT", 10*time.Second),
 		"per HTTP request to the router (env TPLINK_REQUEST_TIMEOUT)")
 	fs.DurationVar(&o.MinBackoff, "min-backoff", e.dur("TPLINK_MIN_BACKOFF", exporter.DefaultMinBackoff),
-		"first wait before a failed login is tried again (env TPLINK_MIN_BACKOFF)")
+		"first wait before the next login, after a failed login or a cycle that ran out of -timeout (env TPLINK_MIN_BACKOFF)")
 	fs.DurationVar(&o.MaxBackoff, "max-backoff", e.dur("TPLINK_MAX_BACKOFF", exporter.DefaultMaxBackoff),
 		"ceiling for the backoff and the session cooldown (env TPLINK_MAX_BACKOFF)")
 	fs.DurationVar(&o.SessionRenew, "session-renew", e.dur("TPLINK_SESSION_RENEW", exporter.DefaultSessionRenew),

@@ -81,10 +81,9 @@ func New(cfg Config, snapshot Registry, process prometheus.Gatherer) (*Sender, e
 	exp, err := otlpmetrichttp.New(context.Background(),
 		otlpmetrichttp.WithEndpointURL(cfg.Endpoint),
 		otlpmetrichttp.WithHeaders(cfg.Headers),
-		otlpmetrichttp.WithTimeout(cfg.Timeout),
-		// WithTimeout is ignored once WithHTTPClient is given, so the bound goes on
-		// the client. Nothing else caps a request: the retry is off and
-		// DefaultTransport sets no response deadline.
+		// The client's Timeout is a request's only ceiling: WithTimeout is ignored
+		// once WithHTTPClient is given, the retry is off, and DefaultTransport sets
+		// no response deadline.
 		otlpmetrichttp.WithHTTPClient(&http.Client{Timeout: cfg.Timeout, Transport: status}),
 		// The buffer replaces this: the default retries inside Export, which
 		// blocks the poll cycle and still drops the batch after a minute.

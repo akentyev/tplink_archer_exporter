@@ -146,7 +146,7 @@ type Poller struct {
 const (
 	holdSessionTaken = "the session was taken; staying away so the web UI keeps it"
 	holdLoginCap     = "hourly login cap reached"
-	holdBackoff      = "backing off after a failed cycle"
+	holdBackoff      = "backing off after a failed login or a cycle that ran out of time"
 )
 
 // NewPoller does not connect; Run does.

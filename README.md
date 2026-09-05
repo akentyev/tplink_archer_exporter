@@ -147,7 +147,7 @@ both are set. `-version` asks a question rather than setting anything, so it has
 | `-interval`         | `TPLINK_INTERVAL`         | `60s`            | poll period                                      |
 | `-timeout`          | `TPLINK_TIMEOUT`          | `30s`            | bounds one whole poll cycle                      |
 | `-request-timeout`  | `TPLINK_REQUEST_TIMEOUT`  | `10s`            | per HTTP request                                 |
-| `-min-backoff`      | `TPLINK_MIN_BACKOFF`      | `1m`             | first wait before a failed login is tried again  |
+| `-min-backoff`      | `TPLINK_MIN_BACKOFF`      | `1m`             | first wait after a failed login or cycle timeout |
 | `-max-backoff`      | `TPLINK_MAX_BACKOFF`      | `15m`            | ceiling for the backoff and the cooldown         |
 | `-session-cooldown` | `TPLINK_SESSION_COOLDOWN` | `5m`             | stay away once losing the session repeats        |
 | `-session-renew`    | `TPLINK_SESSION_RENEW`    | `30m`            | replace the session on a schedule; 0 disables it |
