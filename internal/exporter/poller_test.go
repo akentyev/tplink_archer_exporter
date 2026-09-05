@@ -1340,6 +1340,508 @@ func TestPartialCycleDoesNotArmBackoff(t *testing.T) {
 	})
 }
 
+// backoffConfig puts the whole backoff range above the interval, twelve cycles
+// inside the first wait.
+func backoffConfig() Config {
+	return Config{
+		Interval:         10 * time.Second,
+		Timeout:          5 * time.Second,
+		MinBackoff:       2 * time.Minute,
+		MaxBackoff:       8 * time.Minute,
+		SessionCooldown:  30 * time.Minute,
+		MaxLoginsPerHour: noLoginCap,
+	}
+}
+
+// cyclesRun counts the cycles of an outage: each one either attempted the login
+// or was held back from it.
+func cyclesRun(st State, rt *fakeRouter) uint64 {
+	return st.LoginsSuppressed + uint64(len(rt.loginTimes()))
+}
+
+// backoffSchedule is when a login was attempted while the backoff was the wait
+// itself: the attempts fell on the partial sums of max(Interval, backoff).
+func backoffSchedule(cfg Config, window time.Duration) []time.Duration {
+	var at []time.Duration
+	var backoff time.Duration
+	for t := time.Duration(0); t <= window; {
+		at = append(at, t)
+		switch {
+		case backoff == 0:
+			backoff = cfg.MinBackoff
+		case backoff >= cfg.MaxBackoff/2:
+			backoff = cfg.MaxBackoff
+		default:
+			backoff *= 2
+		}
+		t += max(cfg.Interval, backoff)
+	}
+	return at
+}
+
+// A refused login sets when the next login is tried; the cycle keeps the
+// interval.
+func TestRefusedLoginKeepsTheCycleOnTheInterval(t *testing.T) {
+	rt := newFakeRouter(t)
+	rt.refuseLogin(errors.New("dial tcp 192.0.2.1:80: connect: connection refused"))
+	cfg := backoffConfig()
+
+	synctest.Test(t, func(t *testing.T) {
+		p, stop := startPoller(t, rt, cfg)
+		defer stop()
+
+		const window = 20 * time.Minute
+		time.Sleep(window)
+		synctest.Wait()
+
+		st := p.State()
+		want := uint64(window/cfg.Interval) - 1
+		if got := cyclesRun(st, rt); got < want {
+			t.Errorf("%d cycles in %v at an interval of %v, want at least %d; the backoff (%v..%v) is the "+
+				"delay before the next login and not the period of the cycle, and a cycle that skips the "+
+				"login still runs, publishes tplink_up 0 and counts itself",
+				got, window, cfg.Interval, want, cfg.MinBackoff, cfg.MaxBackoff)
+		}
+	})
+}
+
+// The login keeps the backoff: it is tried when the wait has run out and not on
+// the cycles in between.
+func TestBackoffStillWithholdsTheLogin(t *testing.T) {
+	rt := newFakeRouter(t)
+	rt.refuseLogin(errors.New("dial tcp 192.0.2.1:80: connect: connection refused"))
+	cfg := backoffConfig()
+
+	synctest.Test(t, func(t *testing.T) {
+		p, stop := startPoller(t, rt, cfg)
+		defer stop()
+
+		const window = 25 * time.Minute
+		time.Sleep(window)
+		synctest.Wait()
+
+		want := []time.Duration{2 * time.Minute, 4 * time.Minute, 8 * time.Minute, 8 * time.Minute}
+		gaps := rt.loginGaps()
+		if len(gaps) < len(want) {
+			t.Fatalf("%d retries in %v, too few to measure: %v", len(gaps), window, gaps)
+		}
+		for i, w := range want {
+			// The wait runs out between two cycles and the login waits for the
+			// next one: at most an interval late, never early.
+			if gaps[i] < w || gaps[i] >= w+cfg.Interval {
+				t.Errorf("retry %d came %v after the previous one, want %v: the cycle runs every %v while "+
+					"the router is away, and the login is what the backoff holds back. Gaps: %v",
+					i+1, gaps[i], w, cfg.Interval, gaps)
+			}
+		}
+		if st := p.State(); st.LoginsSuppressed == 0 {
+			t.Error("LoginsSuppressed = 0 although the cycles between the retries were held back from " +
+				"logging in; a cycle that skips the login counts one")
+		}
+	})
+}
+
+// Separating the cycle from the wait leaves the login schedule where it was,
+// and the schedule is what the backoff is for.
+func TestBackoffTriesNoMoreLoginsThanTheWaitDid(t *testing.T) {
+	t.Run("the attempts keep the schedule they had", func(t *testing.T) {
+		rt := newFakeRouter(t)
+		rt.refuseLogin(errors.New("dial tcp 192.0.2.1:80: connect: connection refused"))
+		cfg := backoffConfig()
+
+		synctest.Test(t, func(t *testing.T) {
+			start := time.Now()
+			_, stop := startPoller(t, rt, cfg)
+			defer stop()
+
+			const window = 40 * time.Minute
+			time.Sleep(window)
+			synctest.Wait()
+
+			was := backoffSchedule(cfg, window)
+			got := rt.loginTimes()
+			if len(got) > len(was) {
+				t.Errorf("%d login attempts in %v against the %d the wait made before, at %v; the backoff "+
+					"still decides when a login is tried, and more of them an hour is what the firmware's "+
+					"two-hour lock answers", len(got), window, len(was), was)
+			}
+			for i, at := range got {
+				if i >= len(was) {
+					break
+				}
+				if since := at.Sub(start); since < was[i] {
+					t.Errorf("login %d came at %v, before the %v the wait made before it: %v against %v",
+						i+1, since, was[i], sinceAll(got, start), was)
+				}
+			}
+		})
+	})
+
+	t.Run("no hour carries more than the cap", func(t *testing.T) {
+		rt := newFakeRouter(t)
+		rt.refuseLogin(errors.New("dial tcp 192.0.2.1:80: connect: connection refused"))
+		cfg := Config{
+			Interval:         time.Minute,
+			Timeout:          30 * time.Second,
+			MinBackoff:       time.Minute,
+			MaxBackoff:       15 * time.Minute,
+			SessionCooldown:  5 * time.Minute,
+			MaxLoginsPerHour: 6,
+		}
+
+		synctest.Test(t, func(t *testing.T) {
+			start := time.Now()
+			_, stop := startPoller(t, rt, cfg)
+			defer stop()
+
+			const window = 3 * time.Hour
+			time.Sleep(window)
+			synctest.Wait()
+
+			at := rt.loginTimes()
+			if len(at) <= cfg.MaxLoginsPerHour {
+				t.Fatalf("%d login attempts in %v against a cap of %d; the cap has to bite more than once "+
+					"before there is anything to measure", len(at), window, cfg.MaxLoginsPerHour)
+			}
+			for i, from := range at {
+				n := 0
+				for _, other := range at {
+					if !other.Before(from) && other.Sub(from) < lossWindow {
+						n++
+					}
+				}
+				if n > cfg.MaxLoginsPerHour {
+					t.Errorf("%d login attempts in the hour from %v, attempt %d of %v, against a cap of %d; "+
+						"the cap is a proxy for the firmware's two-hour lock and a cycle that runs anyway "+
+						"must not spend it", n, from.Sub(start), i+1, sinceAll(at, start), cfg.MaxLoginsPerHour)
+				}
+			}
+		})
+	})
+}
+
+// sinceAll is a run of times as offsets from start, for an error message.
+func sinceAll(at []time.Time, start time.Time) []time.Duration {
+	out := make([]time.Duration, 0, len(at))
+	for _, t := range at {
+		out = append(out, t.Sub(start))
+	}
+	return out
+}
+
+// OnCycle, which push sends on, runs once an interval through an outage, inside
+// the longest wait as much as the first.
+func TestOnCycleKeepsTheIntervalThroughTheBackoff(t *testing.T) {
+	rt := newFakeRouter(t)
+	rt.refuseLogin(errors.New("dial tcp 192.0.2.1:80: connect: connection refused"))
+	cfg := backoffConfig()
+	var hook cycleHook
+	cfg.OnCycle = hook.fn()
+
+	synctest.Test(t, func(t *testing.T) {
+		_, stop := startPoller(t, rt, cfg)
+		defer stop()
+
+		// Past the third doubling, so what is measured below sits inside a wait
+		// of MaxBackoff.
+		time.Sleep(15 * time.Minute)
+		synctest.Wait()
+		before := hook.count()
+
+		const window = 5 * time.Minute
+		time.Sleep(window)
+		synctest.Wait()
+		got := hook.records()
+
+		if want := int(window/cfg.Interval) - 1; len(got)-before < want {
+			t.Errorf("the hook ran %d times over the %v inside a wait of %v, want at least %d; the sends are "+
+				"what says the exporter is alive while the router is not, and a window a few cycles wide is "+
+				"what an operator alerts on", len(got)-before, window, cfg.MaxBackoff, want)
+		}
+		for i := before + 1; i < len(got); i++ {
+			if gap := got[i].At.Sub(got[i-1].At); gap > cfg.Interval+cfg.Timeout {
+				t.Errorf("send %d came %v after the one before it, past the interval of %v; the backoff sets "+
+					"the next login, not the next send", i+1, gap, cfg.Interval)
+			}
+		}
+	})
+}
+
+// A cycle the backoff held back is still a cycle: Up says the router is not
+// answering and LastAttempt moves.
+func TestBackoffHeldCycleStillReportsItself(t *testing.T) {
+	rt := newFakeRouter(t)
+	rt.refuseLogin(errors.New("dial tcp 192.0.2.1:80: connect: connection refused"))
+	cfg := backoffConfig()
+
+	synctest.Test(t, func(t *testing.T) {
+		p, stop := startPoller(t, rt, cfg)
+		defer stop()
+
+		// Both samples sit between the second attempt and the third, so nothing
+		// between them reached the router.
+		const early, late = 3 * time.Minute, 5 * time.Minute
+		time.Sleep(early)
+		synctest.Wait()
+		first := p.State()
+
+		time.Sleep(late - early)
+		synctest.Wait()
+		second := p.State()
+
+		if n := len(rt.loginTimes()); n != 2 {
+			t.Fatalf("%d login attempts by %v, want the two at 0 and %v; the samples have to bracket cycles "+
+				"the backoff alone held back", n, late, cfg.MinBackoff)
+		}
+		if second.Up {
+			t.Error("Up is true on a cycle held back from logging in; nothing reached the router")
+		}
+		if !second.LastAttempt.After(first.LastAttempt) {
+			t.Errorf("LastAttempt stood still at %v across %v of the backoff; a cycle that skips the login "+
+				"still runs, and tplink_scrape_duration_seconds and the snapshot age come off it",
+				first.LastAttempt, late-early)
+		}
+	})
+}
+
+// A cycle the backoff held back is a suppressed login, as under the cooldown
+// and the cap: LoginsSuppressed grows, LoginFailures and SessionBlocked do not.
+func TestBackoffCountsTheLoginsItHeldBack(t *testing.T) {
+	rt := newFakeRouter(t)
+	rt.refuseLogin(errors.New("dial tcp 192.0.2.1:80: connect: connection refused"))
+	cfg := backoffConfig()
+
+	synctest.Test(t, func(t *testing.T) {
+		p, stop := startPoller(t, rt, cfg)
+		defer stop()
+
+		const early, late = 3 * time.Minute, 5 * time.Minute
+		time.Sleep(early)
+		synctest.Wait()
+		first := p.State()
+
+		time.Sleep(late - early)
+		synctest.Wait()
+		second := p.State()
+
+		cycles := uint64((late - early) / cfg.Interval)
+		if grew := second.LoginsSuppressed - first.LoginsSuppressed; grew < cycles*3/4 {
+			t.Errorf("LoginsSuppressed went %d -> %d over the %v between the samples, about %d cycles of %v; "+
+				"the backoff holds back one login per cycle and counts one, the way the cooldown and the cap "+
+				"already do", first.LoginsSuppressed, second.LoginsSuppressed, late-early, cycles, cfg.Interval)
+		}
+		if second.LoginFailures != 2 {
+			t.Errorf("LoginFailures = %d by %v; the backoff let two attempts through, and a login it held "+
+				"back never reached the router and is a suppression, not a failure", second.LoginFailures, late)
+		}
+		if second.SessionBlocked {
+			t.Error("SessionBlocked is set while the backoff is what is holding the login back; the router " +
+				"refused the connection outright and no session was taken")
+		}
+	})
+}
+
+// The cooldown outranks the cap, and the cap the backoff, in the reason a hold
+// is logged.
+func TestHoldReasonsKeepTheirOrder(t *testing.T) {
+	now := time.Now()
+	spent := []time.Time{now.Add(-time.Minute), now.Add(-2 * time.Minute)}
+
+	for _, tc := range []struct {
+		name string
+		set  func(*Poller)
+		want string
+	}{
+		{"nothing holds the login back", func(*Poller) {}, ""},
+		{"the backoff alone", func(p *Poller) {
+			p.loginAfter = now.Add(time.Minute)
+		}, holdBackoff},
+		{"the cap over the backoff", func(p *Poller) {
+			p.loginAfter = now.Add(time.Minute)
+			p.loginHistory = spent
+		}, holdLoginCap},
+		{"the cooldown over both", func(p *Poller) {
+			p.loginAfter = now.Add(time.Minute)
+			p.loginHistory = spent
+			p.quietUntil = now.Add(time.Minute)
+		}, holdSessionTaken},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := testConfig()
+			cfg.MaxLoginsPerHour = len(spent)
+			p := NewPoller(newFakeRouter(t), cfg)
+			tc.set(p)
+
+			wait, why := p.holdOff(now)
+			if why != tc.want {
+				t.Errorf("holdOff reports %q, want %q; the reason is what an operator reads off the log "+
+					"line, and the three are not equally serious", why, tc.want)
+			}
+			want := cfg.Interval
+			if tc.want == "" {
+				want = 0
+			}
+			if wait != want {
+				t.Errorf("holdOff asks for %v, want %v; a hold returns the interval rather than what is "+
+					"left of it, so the cycle keeps its rhythm and its counters", wait, want)
+			}
+		})
+	}
+}
+
+// With the cap and the backoff both holding, the log line names the cap.
+func TestLoginCapOutranksTheBackoffInTheLog(t *testing.T) {
+	logged := captureLog(t, slog.LevelInfo)
+	rt := newFakeRouter(t)
+	rt.refuseLogin(errors.New("dial tcp 192.0.2.1:80: connect: connection refused"))
+	cfg := Config{
+		Interval:         time.Minute,
+		Timeout:          10 * time.Second,
+		MinBackoff:       5 * time.Minute,
+		MaxBackoff:       20 * time.Minute,
+		SessionCooldown:  time.Hour,
+		MaxLoginsPerHour: 2,
+	}
+
+	synctest.Test(t, func(t *testing.T) {
+		_, stop := startPoller(t, rt, cfg)
+		defer stop()
+
+		// The first wait: one attempt made, the cap still has room, so the
+		// backoff is the only thing holding.
+		time.Sleep(4 * time.Minute)
+		synctest.Wait()
+		named := logged.count(holdBackoff)
+		if named == 0 {
+			t.Fatalf("nothing was held back by the backoff in the %v after the first refusal, which arms a "+
+				"wait of %v. Log:\n%s", 4*time.Minute, cfg.MinBackoff, logged)
+		}
+		if n := logged.count(holdLoginCap); n != 0 {
+			t.Fatalf("the cap was named %d times after one attempt of %d; there is no priority to measure "+
+				"until it is reached. Log:\n%s", n, cfg.MaxLoginsPerHour, logged)
+		}
+
+		// The second attempt spends the cap, and it arms a wait of ten minutes:
+		// from here both hold.
+		time.Sleep(10 * time.Minute)
+		synctest.Wait()
+
+		if logged.count(holdLoginCap) == 0 {
+			t.Errorf("no cycle named the cap although %d attempts have been made against a cap of %d. "+
+				"Log:\n%s", len(rt.loginTimes()), cfg.MaxLoginsPerHour, logged)
+		}
+		if n := logged.count(holdBackoff) - named; n != 0 {
+			t.Errorf("%d cycles named the backoff while the cap was holding the login back too; the cap "+
+				"stands for the firmware's two-hour lock and is what an operator has to read. Log:\n%s",
+				n, logged)
+		}
+	})
+}
+
+// A cycle that ran out of Config.Timeout is held the way a refused login is.
+func TestCycleOutOfTimeHoldsTheLoginNotTheCycle(t *testing.T) {
+	// The first source hangs, so the cycle ends on the deadline having gathered
+	// nothing.
+	stuck := sources[0].Path
+
+	rt := newFakeRouter(t)
+	rt.block(stuck)
+	cfg := backoffConfig()
+
+	synctest.Test(t, func(t *testing.T) {
+		p, stop := startPoller(t, rt, cfg)
+		defer stop()
+
+		const window = 20 * time.Minute
+		time.Sleep(window)
+		synctest.Wait()
+
+		st := p.State()
+		want := uint64(window/cfg.Interval) - 1
+		if got := cyclesRun(st, rt); got < want {
+			t.Errorf("%d cycles in %v at an interval of %v, want at least %d; a cycle that ran out of "+
+				"Config.Timeout arms the backoff, and the backoff is the delay before the next login, not "+
+				"the period of the cycle", got, window, cfg.Interval, want)
+		}
+		if !errors.Is(st.LastErr, context.DeadlineExceeded) {
+			t.Fatalf("LastErr = %v; %s never answers, so the cycles measured here are the ones that ran out "+
+				"of the %v deadline", st.LastErr, stuck, cfg.Timeout)
+		}
+		gaps := rt.loginGaps()
+		if len(gaps) < 3 {
+			t.Fatalf("%d retries in %v, too few to measure: %v", len(gaps), window, gaps)
+		}
+		for i, g := range gaps {
+			if g < cfg.MinBackoff {
+				t.Errorf("retry %d came %v after the previous one, inside MinBackoff %v; a cycle that timed "+
+					"out withholds the login exactly as a refused one does. Gaps: %v",
+					i+1, g, cfg.MinBackoff, gaps)
+			}
+		}
+	})
+}
+
+// The two lines that arm the backoff carry retry_in, the login's wait; the held
+// cycles carry next_cycle_in, the interval — two numbers under two names.
+func TestTheArmedBackoffIsLogged(t *testing.T) {
+	for _, tc := range []struct {
+		name, msg string
+		setup     func(*fakeRouter)
+	}{
+		{"a refused login", "login failed", func(rt *fakeRouter) {
+			rt.refuseLogin(errors.New("dial tcp 192.0.2.1:80: connect: connection refused"))
+		}},
+		{"a cycle out of time", "the cycle ran out of time", func(rt *fakeRouter) {
+			rt.block(sources[0].Path)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			logged := captureLog(t, slog.LevelInfo)
+			rt := newFakeRouter(t)
+			tc.setup(rt)
+			cfg := backoffConfig()
+
+			synctest.Test(t, func(t *testing.T) {
+				_, stop := startPoller(t, rt, cfg)
+				defer stop()
+
+				const window = 25 * time.Minute
+				time.Sleep(window)
+				synctest.Wait()
+
+				want := []time.Duration{2 * time.Minute, 4 * time.Minute, 8 * time.Minute, 8 * time.Minute}
+				recs := logged.records(tc.msg)
+				if len(recs) < len(want) {
+					t.Fatalf("%d %q records in %v, too few to read the wait off. Log:\n%s",
+						len(recs), tc.msg, window, logged)
+				}
+				for i, w := range want {
+					if attr := "retry_in=" + w.String(); !strings.Contains(recs[i], attr) {
+						t.Errorf("record %d carries no %s: %s\nthe wait this cycle armed is the login's, and "+
+							"the interval of %v is what the cycles it holds back report", i+1, attr, recs[i],
+							cfg.Interval)
+					}
+				}
+
+				held := logged.records(holdBackoff)
+				if len(held) == 0 {
+					t.Fatalf("no cycle was held back by the backoff over the %v. Log:\n%s", window, logged)
+				}
+				for i, rec := range held {
+					if attr := "next_cycle_in=" + cfg.Interval.String(); !strings.Contains(rec, attr) {
+						t.Errorf("held record %d carries no %s: %s", i+1, attr, rec)
+					}
+					if strings.Contains(rec, "retry_in=") {
+						t.Errorf("held record %d names retry_in: %s\nthe line that armed the wait says "+
+							"retry_in=%v and means the login; this one is the interval and means the cycle",
+							i+1, rec, want[0])
+					}
+				}
+			})
+		})
+	}
+}
+
 // A cycle in which nothing answered is a lost session however the firmware
 // worded it, and is answered the same way: come back once, and go quiet if it
 // happens again straight after. Anything else leaves a path by which a browser
@@ -3473,6 +3975,376 @@ func TestLoginThatNeverLandsForgetsTheFailingEndpoints(t *testing.T) {
 			})
 		})
 	}
+}
+
+// Config.OnCycle is the seam push hangs on. It runs once per cycle whatever the
+// cycle produced, carries the time that cycle's data claims, and is handed a
+// context that outlives both the cycle's budget and the shutdown.
+
+// hookCall is one OnCycle call as the callee saw it.
+type hookCall struct {
+	TakenAt time.Time
+	At      time.Time // when the hook ran
+	CtxErr  error     // ctx.Err() on entry
+	Seen    State     // what a scrape would have seen from inside the hook
+}
+
+// cycleHook is a Config.OnCycle that records its arguments. Run calls it from
+// its own goroutine, so the log is read under the mutex.
+type cycleHook struct {
+	// peek is read inside the hook, as the sender's collector reads State; set
+	// before Run's goroutine starts. nil leaves State unread.
+	peek func() State
+
+	mu     sync.Mutex
+	logged []hookCall
+}
+
+func (h *cycleHook) fn() func(context.Context, time.Time) {
+	return func(ctx context.Context, takenAt time.Time) {
+		var seen State
+		if h.peek != nil {
+			seen = h.peek()
+		}
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		h.logged = append(h.logged, hookCall{TakenAt: takenAt, At: time.Now(), CtxErr: ctx.Err(), Seen: seen})
+	}
+}
+
+func (h *cycleHook) records() []hookCall {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]hookCall(nil), h.logged...)
+}
+
+func (h *cycleHook) count() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.logged)
+}
+
+// A cycle that published a snapshot hands over that snapshot's own time, once,
+// and has published it before the hook runs.
+func TestOnCycleRunsAfterEveryCycle(t *testing.T) {
+	rt := newFakeRouter(t)
+	cfg := testConfig()
+	var hook cycleHook
+
+	synctest.Test(t, func(t *testing.T) {
+		start := time.Now()
+
+		// Started by hand: the hook reads p, which must be assigned before the
+		// goroutine that calls it starts.
+		var p *Poller
+		hook.peek = func() State { return p.State() }
+		cfg.OnCycle = hook.fn()
+		p = NewPoller(rt, cfg)
+		ctx, cancel := context.WithCancel(t.Context())
+		done := make(chan error, 1)
+		go func() { done <- p.Run(ctx) }()
+		defer func() {
+			cancel()
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Errorf("Run reported %v; a cancelled context is a shutdown, not a failure", err)
+				}
+			case <-time.After(time.Minute):
+				t.Error("Run did not return after its context was cancelled")
+			}
+		}()
+
+		st := awaitCycle(t, p, cfg)
+		if st.Snapshot == nil {
+			t.Fatal("the first cycle produced no snapshot")
+		}
+		first := hook.records()
+		if len(first) != 1 {
+			t.Fatalf("the hook ran %d times over one cycle, want once", len(first))
+		}
+		// The first cycle logs in, so the snapshot is taken a login after the
+		// cycle began and the two times tell each other apart.
+		if !st.Snapshot.TakenAt.After(start) {
+			t.Fatalf("the snapshot claims %v and the cycle began at %v; with the two alike this proves "+
+				"nothing about which one the hook was handed", st.Snapshot.TakenAt, start)
+		}
+		if !first[0].TakenAt.Equal(st.Snapshot.TakenAt) {
+			t.Errorf("the hook was handed %v while the cycle's snapshot says %v; what is pushed carries the "+
+				"snapshot's own time, or a scrape and a push of one cycle disagree about when it happened",
+				first[0].TakenAt, st.Snapshot.TakenAt)
+		}
+		if first[0].CtxErr != nil {
+			t.Errorf("the hook got a context already carrying %v", first[0].CtxErr)
+		}
+
+		window := 3*cfg.Interval + cfg.Interval/2
+		time.Sleep(window)
+		synctest.Wait()
+
+		got := hook.records()
+		cycles := rt.timesCalled(sources[0].Path)
+		if len(got) != cycles {
+			t.Errorf("the hook ran %d times over %d cycles in %v; one cycle ends in one call", len(got), cycles, window)
+		}
+		last, snap := got[len(got)-1], p.State().Snapshot
+		if !last.TakenAt.Equal(snap.TakenAt) {
+			t.Errorf("the last call was handed %v while the last snapshot says %v", last.TakenAt, snap.TakenAt)
+		}
+
+		// The state is published before the hook runs: a hook running first would
+		// send the previous cycle's data under this cycle's time.
+		for i, c := range got {
+			if c.Seen.Snapshot == nil {
+				t.Errorf("call %d found State carrying no snapshot at all, although its own cycle "+
+					"published one taken at %v", i+1, c.TakenAt)
+				continue
+			}
+			if !c.Seen.Snapshot.TakenAt.Equal(c.TakenAt) {
+				t.Errorf("call %d was handed %v while State read inside the hook still showed the snapshot "+
+					"taken at %v; the cycle publishes its state and drops the lock before the hook runs, or "+
+					"a push carries this cycle's time on the last cycle's data",
+					i+1, c.TakenAt, c.Seen.Snapshot.TakenAt)
+			}
+		}
+	})
+}
+
+// A cycle that reached nothing still ends in the hook, stamped with its own
+// start: the cycle a dark router produced has to travel too, or the router that
+// went dark reads downstream as the exporter going dark.
+func TestOnCycleRunsForACycleThatPublishedNothing(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(*fakeRouter)
+	}{
+		{"the login is refused", func(rt *fakeRouter) {
+			rt.refuseLogin(fmt.Errorf("login: %w", tpapi.ErrSessionBusy))
+		}},
+		{"nothing answers", func(rt *fakeRouter) {
+			rt.failAll(errors.New("dial tcp 192.0.2.1:80: connect: connection refused"))
+		}},
+		{"the session is taken at the first endpoint", func(rt *fakeRouter) {
+			rt.expireAtEvery(sources[0].Path)
+		}},
+		{"the cycle runs out of time", func(rt *fakeRouter) {
+			for _, s := range sources {
+				rt.block(s.Path)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rt := newFakeRouter(t)
+			tc.setup(rt)
+			cfg := testConfig()
+			var hook cycleHook
+			cfg.OnCycle = hook.fn()
+
+			synctest.Test(t, func(t *testing.T) {
+				start := time.Now()
+				p, stop := startPoller(t, rt, cfg)
+				defer stop()
+
+				st := awaitCycle(t, p, cfg)
+				if st.Snapshot != nil {
+					t.Fatalf("the cycle published a snapshot taken at %v; this case is one where nothing "+
+						"is collected", st.Snapshot.TakenAt)
+				}
+				got := hook.records()
+				if len(got) == 0 {
+					t.Fatalf("a cycle that collected nothing never reached the hook; LastErr = %v, and "+
+						"tplink_up = 0 is exactly what has to travel", st.LastErr)
+				}
+				if got[0].TakenAt.IsZero() {
+					t.Fatal("the hook was handed a zero time; a cycle without a snapshot carries its own start")
+				}
+				if d := got[0].TakenAt.Sub(start); d < 0 || d > replyLatency {
+					t.Errorf("the hook was handed %v, %v off the cycle start %v; a cycle that published no "+
+						"snapshot is stamped with the moment it began, not the moment it ended (%v)",
+						got[0].TakenAt, d, start, got[0].At)
+				}
+				if got[0].CtxErr != nil {
+					t.Errorf("the hook got a context already carrying %v", got[0].CtxErr)
+				}
+			})
+		})
+	}
+}
+
+// What a cycle collected before the session was taken is published, and the
+// hook follows the snapshot rather than the cycle start.
+func TestOnCycleFollowsThePartialSnapshot(t *testing.T) {
+	rt := newFakeRouter(t)
+	// Every login is answered by taking the session away again at srcPorts, so
+	// the first cycle is the one that publishes a part of the poll set. expireAt
+	// alone would not do: a login re-arms the expiry from expireEvery, and the
+	// first cycle's own login would clear it.
+	rt.expireAtEvery(srcPorts)
+	cfg := testConfig()
+	var hook cycleHook
+	cfg.OnCycle = hook.fn()
+
+	synctest.Test(t, func(t *testing.T) {
+		start := time.Now()
+		p, stop := startPoller(t, rt, cfg)
+		defer stop()
+
+		st := awaitCycle(t, p, cfg)
+		if st.Snapshot == nil {
+			t.Fatalf("the cycle published nothing although it lost the session at %s, part way through the "+
+				"poll set", srcPorts)
+		}
+		if len(st.Snapshot.Errors) != 1 || st.Snapshot.Errors[srcPorts] == nil {
+			t.Fatalf("Snapshot.Errors = %v, want the one entry for %s; this case is the cycle that ends "+
+				"part way through the poll set", st.Snapshot.Errors, srcPorts)
+		}
+		// The cycle logs in before it polls, so the snapshot is taken a login
+		// after the cycle began and the two times tell each other apart.
+		if !st.Snapshot.TakenAt.After(start) {
+			t.Fatalf("the snapshot claims %v and the cycle began at %v; with the two alike this proves "+
+				"nothing", st.Snapshot.TakenAt, start)
+		}
+		got := hook.records()
+		if len(got) == 0 {
+			t.Fatal("the cycle that lost the session never reached the hook")
+		}
+		if !got[0].TakenAt.Equal(st.Snapshot.TakenAt) {
+			t.Errorf("the hook was handed %v while the partial snapshot it published says %v; a cycle that "+
+				"published one is stamped with its time, whatever ended the cycle",
+				got[0].TakenAt, st.Snapshot.TakenAt)
+		}
+	})
+}
+
+// Config.Timeout is the cycle's whole budget and a slow cycle ends with none of
+// it left. The hook's context is not the cycle's, so the sender still has its
+// own time to spend.
+func TestOnCycleGetsAContextTheCycleDidNotSpend(t *testing.T) {
+	rt := newFakeRouter(t)
+	rt.block(sources[0].Path)
+	cfg := testConfig()
+	var hook cycleHook
+	cfg.OnCycle = hook.fn()
+
+	synctest.Test(t, func(t *testing.T) {
+		start := time.Now()
+		p, stop := startPoller(t, rt, cfg)
+		defer stop()
+
+		awaitCycle(t, p, cfg)
+		got := hook.records()
+		if len(got) == 0 {
+			t.Fatal("the hook never ran")
+		}
+		if spent := got[0].At.Sub(start); spent < cfg.Timeout {
+			t.Fatalf("the cycle ended %v after it began while Config.Timeout is %v; it never ran out of "+
+				"time, so this proves nothing", spent, cfg.Timeout)
+		}
+		if got[0].CtxErr != nil {
+			t.Errorf("the hook got a context carrying %v after a cycle that spent all %v of Config.Timeout; "+
+				"the cycle's budget is not the sender's, or every slow cycle would fail to send",
+				got[0].CtxErr, cfg.Timeout)
+		}
+	})
+}
+
+// The cycle a shutdown cuts short is the last one there will be, and it travels:
+// the hook runs before Run reads its cancelled context, on a context with that
+// cancellation removed.
+func TestOnCycleRunsForTheCycleAShutdownInterrupts(t *testing.T) {
+	rt := newFakeRouter(t)
+	// The cycle sits on this endpoint until something ends the request, so the
+	// cancellation lands mid-cycle rather than in the wait between cycles.
+	rt.block(sources[0].Path)
+	cfg := testConfig()
+	var hook cycleHook
+	cfg.OnCycle = hook.fn()
+
+	synctest.Test(t, func(t *testing.T) {
+		start := time.Now()
+		p := NewPoller(rt, cfg)
+		ctx, cancel := context.WithCancel(t.Context())
+		done := make(chan error, 1)
+		go func() { done <- p.Run(ctx) }()
+
+		time.Sleep(cfg.Timeout / 2)
+		synctest.Wait()
+		if n := hook.count(); n != 0 {
+			t.Fatalf("the hook ran %d times %v into the first cycle, which is still running; the shutdown "+
+				"below would not be landing mid-cycle", n, cfg.Timeout/2)
+		}
+		cancel()
+
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Errorf("Run returned %v; a cancelled context is a clean shutdown and reports nil", err)
+			}
+		case <-time.After(time.Minute):
+			t.Fatal("Run did not return after its context was cancelled")
+		}
+
+		got := hook.records()
+		if len(got) != 1 {
+			t.Fatalf("the hook ran %d times, want once: the cycle a shutdown cut short is still a cycle, and "+
+				"the last one before a docker stop has to reach the sender", len(got))
+		}
+		if got[0].CtxErr != nil {
+			t.Errorf("the hook got a context carrying %v; the shutdown's cancellation is removed from it, or "+
+				"the send it exists to make dies where it starts", got[0].CtxErr)
+		}
+		if d := got[0].TakenAt.Sub(start); d < 0 || d > replyLatency {
+			t.Errorf("the interrupted cycle was stamped %v, %v off the moment it began, %v",
+				got[0].TakenAt, d, start)
+		}
+	})
+}
+
+// A cycle held back from logging in never touches the router and still ends in
+// the hook: while the poller stays away from a session someone else is using,
+// the series has to keep saying so.
+func TestOnCycleRunsWhileTheLoginIsHeldBack(t *testing.T) {
+	rt := newFakeRouter(t)
+	rt.expireAtEvery(srcPorts)
+	cfg := testConfig()
+	cfg.SessionCooldown = 20 * time.Minute
+	var hook cycleHook
+	cfg.OnCycle = hook.fn()
+
+	synctest.Test(t, func(t *testing.T) {
+		p, stop := startPoller(t, rt, cfg)
+		defer stop()
+
+		// Two cycles in, the second loss has armed the spell; both samples sit
+		// well inside it.
+		const early, late = 5 * time.Minute, 15 * time.Minute
+		time.Sleep(early)
+		synctest.Wait()
+		first, ran := p.State(), hook.count()
+
+		time.Sleep(late - early)
+		synctest.Wait()
+		second, got := p.State(), hook.records()
+
+		if !second.SessionBlocked {
+			t.Fatalf("SessionBlocked is false %v into a quiet spell of %v; there is no spell to measure",
+				late, cfg.SessionCooldown)
+		}
+		suppressed := int(second.LoginsSuppressed - first.LoginsSuppressed)
+		if suppressed == 0 {
+			t.Fatalf("no login was held back between %v and %v of a %v spell; there is nothing to measure",
+				early, late, cfg.SessionCooldown)
+		}
+		if grew := len(got) - ran; grew < suppressed {
+			t.Errorf("the hook ran %d times over the %v in which %d cycles were held back from logging in; a "+
+				"cycle that never reached the router is still a cycle and still has to travel",
+				grew, late-early, suppressed)
+		}
+		if n := len(got); n >= 2 && got[n-1].TakenAt.Equal(got[n-2].TakenAt) {
+			t.Errorf("two held-back cycles in a row were both stamped %v; each carries its own start",
+				got[n-1].TakenAt)
+		}
+	})
 }
 
 // lastCallBefore and firstCallAfter bracket a moment in the call log: what the

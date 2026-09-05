@@ -188,7 +188,7 @@ tplink_endpoints_failed 0
 # HELP tplink_login_failed_total Failed logins since start, session conflicts included.
 # TYPE tplink_login_failed_total counter
 tplink_login_failed_total 2
-# HELP tplink_login_suppressed_total Logins not attempted since start, either during the cooldown after losing the session or against the hourly cap.
+# HELP tplink_login_suppressed_total Logins not attempted since start: during the cooldown after losing the session, against the hourly cap, or inside the backoff after a failed cycle.
 # TYPE tplink_login_suppressed_total counter
 tplink_login_suppressed_total 4
 # HELP tplink_login_total Successful logins since start.
@@ -764,7 +764,7 @@ func TestNoSnapshotServesHealthOnly(t *testing.T) {
 # HELP tplink_login_failed_total Failed logins since start, session conflicts included.
 # TYPE tplink_login_failed_total counter
 tplink_login_failed_total 3
-# HELP tplink_login_suppressed_total Logins not attempted since start, either during the cooldown after losing the session or against the hourly cap.
+# HELP tplink_login_suppressed_total Logins not attempted since start: during the cooldown after losing the session, against the hourly cap, or inside the backoff after a failed cycle.
 # TYPE tplink_login_suppressed_total counter
 tplink_login_suppressed_total 2
 # HELP tplink_login_total Successful logins since start.
@@ -1290,7 +1290,7 @@ tplink_firmware_info{hardware="Archer AX80 v1.0",model="Archer AX80",version="1.
 # HELP tplink_login_failed_total Failed logins since start, session conflicts included.
 # TYPE tplink_login_failed_total counter
 tplink_login_failed_total 0
-# HELP tplink_login_suppressed_total Logins not attempted since start, either during the cooldown after losing the session or against the hourly cap.
+# HELP tplink_login_suppressed_total Logins not attempted since start: during the cooldown after losing the session, against the hourly cap, or inside the backoff after a failed cycle.
 # TYPE tplink_login_suppressed_total counter
 tplink_login_suppressed_total 0
 # HELP tplink_login_total Successful logins since start.

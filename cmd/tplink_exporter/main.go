@@ -10,18 +10,23 @@ import (
 	"fmt"
 	"html"
 	"log/slog"
+	"maps"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/akentyev/tplink_archer_exporter/internal/exporter"
+	"github.com/akentyev/tplink_archer_exporter/internal/push"
 	"github.com/akentyev/tplink_archer_exporter/internal/tpapi"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"go.opentelemetry.io/otel"
 )
 
 const (
@@ -29,13 +34,17 @@ const (
 	// starts, with a warning.
 	minInterval = 30 * time.Second
 
-	// shutdownTimeout bounds the HTTP shutdown; the poller's logout runs
-	// alongside it on its own timeout.
+	// shutdownTimeout bounds the HTTP shutdown in pull mode and the sender's
+	// last drain in push; the poller's logout runs on its own timeout.
 	shutdownTimeout = 10 * time.Second
 
 	// staleAfter is how many intervals a snapshot may go unrefreshed before the
 	// collector stops serving it and leaves only the exporter's own health.
 	staleAfter = 5
+
+	// pushJob is the job label a push carries, and its OTLP service.name. It
+	// matches README's scrape_configs example, so job reads the same in both modes.
+	pushJob = "tplink_exporter"
 )
 
 // -X sets these at link time; go run and a plain go build leave the defaults.
@@ -66,22 +75,13 @@ func main() {
 	// together. A start that names one fault costs a restart to learn the next.
 	logger, err := newLogger(o.LogLevel)
 	e.add(err)
-	if o.Host == "" {
-		e.addf("router address is required: -host or TPLINK_HOST, e.g. -host 192.168.0.1")
-	}
+	validate(o, e)
+	// Parsed here so a malformed pair joins the same report as the other faults.
+	labels := pushLabels(o.PushLabels, e)
 	// no -password flag: a flag shows up in ps and in the
 	// container's process list.
 	password, err := readPassword(o.PasswordFile)
 	e.add(err)
-	if o.SessionRenew < 0 {
-		e.addf("-session-renew cannot be negative; 0 switches the renewal off")
-	}
-	if o.Interval <= 0 || o.Timeout <= 0 || o.RequestTimeout <= 0 || o.MinBackoff <= 0 || o.SessionCooldown <= 0 {
-		e.addf("-interval, -timeout, -request-timeout, -min-backoff and -session-cooldown must be positive")
-	}
-	if o.MaxBackoff < o.MinBackoff {
-		e.addf("-max-backoff (%s) is below -min-backoff (%s)", o.MaxBackoff, o.MinBackoff)
-	}
 	if len(e.errs) > 0 {
 		for _, err := range e.errs {
 			errorf("%v", err)
@@ -102,14 +102,30 @@ func main() {
 	// Force stays false, so a busy session backs the poller off and raises
 	// tplink_session_blocked instead of evicting the UI.
 
-	poller := exporter.NewPoller(client, pollerConfig(o))
-
-	reg := prometheus.NewRegistry()
-	reg.MustRegister(
-		exporter.NewCollector(poller, staleAfter*o.Interval, build),
+	// Two registries: a push stamps the snapshot with the cycle's time and process
+	// metrics with the send time, and no name prefix separates the two.
+	snapshot := prometheus.NewRegistry()
+	process := prometheus.NewRegistry()
+	process.MustRegister(
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 	)
+
+	var sender *push.Sender
+	if o.pushMode() {
+		// The bridge reports a failed collection through otel.Handle, whose default
+		// handler writes to stderr past slog.
+		otel.SetErrorHandler(otel.ErrorHandlerFunc(func(err error) {
+			slog.Error("push metrics", "err", err)
+		}))
+		sender, err = push.New(pushConfig(o, client.Host, labels), snapshot, process)
+		if err != nil {
+			fatalf("push: %v", err)
+		}
+	}
+
+	poller := exporter.NewPoller(client, pollerConfig(o, sender))
+	snapshot.MustRegister(exporter.NewCollector(poller, staleAfter*o.Interval, build))
 
 	slog.Info("starting", startupAttrs(o, build, client.Host)...)
 
@@ -124,27 +140,17 @@ func main() {
 		}
 	}()
 
-	mux := http.NewServeMux()
-	mux.Handle("GET /metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{
-		ErrorHandling: promhttp.ContinueOnError,
-		ErrorLog:      logAdapter{},
-		Registry:      reg, // counts scrape errors instead of only logging them
-	}))
-	mux.HandleFunc("GET /{$}", landing(o.Interval, build))
+	srv := metricsServer(o, build, snapshot, process)
 
-	srv := &http.Server{
-		Addr:              o.Listen,
-		Handler:           mux,
-		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       10 * time.Second,
-		WriteTimeout:      30 * time.Second,
-		IdleTimeout:       60 * time.Second,
+	// serveErr stays nil in push mode, and a nil channel never fires: with no
+	// listener, only a signal ends the run.
+	var serveErr chan error
+	if srv != nil {
+		serveErr = make(chan error, 1)
+		go func() { serveErr <- srv.ListenAndServe() }()
 	}
 
 	var exitErr error
-	serveErr := make(chan error, 1)
-	go func() { serveErr <- srv.ListenAndServe() }()
-
 	select {
 	case err := <-serveErr:
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -154,22 +160,65 @@ func main() {
 		slog.Info("signal received, shutting down")
 	}
 
-	// Cancelling unwinds the poller, which logs out and frees the router's
-	// session. It also restores default signal handling, so a second signal
-	// kills the process outright.
-	stop()
-
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
-	defer cancel()
-	if err := srv.Shutdown(shutdownCtx); err != nil {
-		slog.Warn("http shutdown", "err", err)
-	}
-	<-pollerDone
+	// stop unwinds the poller, which logs out and frees the router's session,
+	// and restores default signal handling, so a second signal kills the
+	// process outright.
+	newStopSequence(stop, srv, sender, pollerDone, shutdownTimeout).run()
 
 	if exitErr != nil {
 		fatalf("%v", exitErr)
 	}
 	slog.Info("stopped")
+}
+
+// shutdowner is the HTTP server and the sender as the stop sequence uses them.
+type shutdowner interface {
+	Shutdown(ctx context.Context) error
+}
+
+// stopSequence is the shutdown with each part injectable for the tests. The
+// fields are in the order they run.
+type stopSequence struct {
+	cancel     func()          // the signal context's stop
+	server     shutdowner      // nil in push mode, which binds nothing
+	pollerDone <-chan struct{} // closed once the poller has logged out
+	sender     shutdowner      // nil in pull mode, which builds none
+	timeout    time.Duration   // per part
+}
+
+// newStopSequence takes the concrete types: a nil *http.Server or *push.Sender
+// put straight into an interface field would test non-nil.
+func newStopSequence(cancel func(), srv *http.Server, sender *push.Sender, pollerDone <-chan struct{}, timeout time.Duration) stopSequence {
+	s := stopSequence{cancel: cancel, pollerDone: pollerDone, timeout: timeout}
+	if srv != nil {
+		s.server = srv
+	}
+	if sender != nil {
+		s.sender = sender
+	}
+	return s
+}
+
+// run cancels first, which ends the poller, and joins it before the sender
+// closes: closing the OTLP exporter under a send in flight answers "HTTP
+// exporter is shutdown" and drops what the drain exists to deliver.
+func (s stopSequence) run() {
+	s.cancel()
+	if s.server != nil {
+		s.shutdown("http shutdown", s.server)
+	}
+	<-s.pollerDone
+	if s.sender != nil {
+		s.shutdown("push shutdown", s.sender)
+	}
+}
+
+func (s stopSequence) shutdown(what string, part shutdowner) {
+	ctx, cancel := context.WithTimeout(context.Background(), s.timeout)
+	defer cancel()
+	if err := part.Shutdown(ctx); err != nil {
+		slog.Warn(what, "err", err)
+	}
 }
 
 // options is the command line once parsed.
@@ -188,8 +237,41 @@ type options struct {
 	// in later.
 	SessionRenew    time.Duration
 	SessionCooldown time.Duration
+	// PushURL selects the mode: set, and metrics go out to an OTLP receiver.
+	PushURL     string
+	PushLabels  labelList
+	PushBuffer  int
+	PushTimeout time.Duration
 	// Version configures nothing: it is answered and the process is gone.
 	Version bool
+}
+
+// pushMode decides the validation, the hook and the listener alike.
+func (o *options) pushMode() bool { return o.PushURL != "" }
+
+// labelList is the repeatable -push-label: the first flag replaces what
+// TPLINK_PUSH_LABELS seeded, later ones append. Pairs are one NUL-joined string
+// so options stays comparable; the comma is the separator in the variable only,
+// and ordinary text in a flag's value.
+type labelList struct {
+	pairs   string
+	flagged bool
+}
+
+const (
+	labelSep   = "\x00"
+	labelComma = ","
+)
+
+func (l *labelList) String() string { return strings.ReplaceAll(l.pairs, labelSep, labelComma) }
+
+func (l *labelList) Set(v string) error {
+	if l.flagged {
+		l.pairs += labelSep + v
+		return nil
+	}
+	l.pairs, l.flagged = v, true
+	return nil
 }
 
 // bindFlags declares every flag on fs, parsing straight into the returned
@@ -216,13 +298,22 @@ func bindFlags(fs *flag.FlagSet, e *env) *options {
 	fs.DurationVar(&o.RequestTimeout, "request-timeout", e.dur("TPLINK_REQUEST_TIMEOUT", 10*time.Second),
 		"per HTTP request to the router (env TPLINK_REQUEST_TIMEOUT)")
 	fs.DurationVar(&o.MinBackoff, "min-backoff", e.dur("TPLINK_MIN_BACKOFF", exporter.DefaultMinBackoff),
-		"first wait after a failed cycle (env TPLINK_MIN_BACKOFF)")
+		"first wait before the next login, after a failed login or a cycle that ran out of -timeout (env TPLINK_MIN_BACKOFF)")
 	fs.DurationVar(&o.MaxBackoff, "max-backoff", e.dur("TPLINK_MAX_BACKOFF", exporter.DefaultMaxBackoff),
 		"ceiling for the backoff and the session cooldown (env TPLINK_MAX_BACKOFF)")
 	fs.DurationVar(&o.SessionRenew, "session-renew", e.dur("TPLINK_SESSION_RENEW", exporter.DefaultSessionRenew),
 		"replace the session after this long; 0 switches the renewal off (env TPLINK_SESSION_RENEW)")
 	fs.DurationVar(&o.SessionCooldown, "session-cooldown", e.dur("TPLINK_SESSION_COOLDOWN", exporter.DefaultSessionCooldown),
 		"how long to stay away once losing the session starts repeating (env TPLINK_SESSION_COOLDOWN)")
+	fs.StringVar(&o.PushURL, "push-url", e.str("TPLINK_PUSH_URL", ""),
+		"OTLP receiver, e.g. http://vm:8428/opentelemetry/v1/metrics; set it and no listener is started (env TPLINK_PUSH_URL)")
+	o.PushLabels = labelList{pairs: strings.ReplaceAll(e.str("TPLINK_PUSH_LABELS", ""), labelComma, labelSep)}
+	fs.Var(&o.PushLabels, "push-label",
+		"label on every pushed point, name=value, repeatable; job and instance are ordinary cases of it (env TPLINK_PUSH_LABELS, comma-separated)")
+	fs.IntVar(&o.PushBuffer, "push-buffer", e.num("TPLINK_PUSH_BUFFER", push.DefaultBuffer),
+		"cycles kept unsent while the receiver is down (env TPLINK_PUSH_BUFFER)")
+	fs.DurationVar(&o.PushTimeout, "push-timeout", e.dur("TPLINK_PUSH_TIMEOUT", 10*time.Second),
+		"one send, its drain of the buffer included (env TPLINK_PUSH_TIMEOUT)")
 	fs.StringVar(&o.LogLevel, "log-level", e.str("TPLINK_LOG_LEVEL", "info"),
 		"debug, info, warn or error (env TPLINK_LOG_LEVEL)")
 	// No environment variable behind this one: a container carrying it would
@@ -231,8 +322,55 @@ func bindFlags(fs *flag.FlagSet, e *env) *options {
 	return o
 }
 
-func pollerConfig(o *options) exporter.Config {
-	return exporter.Config{
+// validate records every fault at once. The -push-* rules apply in push mode
+// only: without a receiver they configure nothing.
+func validate(o *options, e *env) {
+	if o.Host == "" {
+		e.addf("router address is required: -host or TPLINK_HOST, e.g. -host 192.168.0.1")
+	}
+	if o.SessionRenew < 0 {
+		e.addf("-session-renew cannot be negative; 0 switches the renewal off")
+	}
+	if o.Interval <= 0 || o.Timeout <= 0 || o.RequestTimeout <= 0 || o.MinBackoff <= 0 || o.SessionCooldown <= 0 {
+		e.addf("-interval, -timeout, -request-timeout, -min-backoff and -session-cooldown must be positive")
+	}
+	if o.MaxBackoff < o.MinBackoff {
+		e.addf("-max-backoff (%s) is below -min-backoff (%s)", o.MaxBackoff, o.MinBackoff)
+	}
+	if !o.pushMode() {
+		return
+	}
+	// otlpmetrichttp keeps its default -- localhost:4318 over HTTPS -- for a URL it
+	// cannot parse and takes an empty host as it is, so nothing downstream refuses
+	// a bad address; it would fail once a cycle, buffered and lost at the stop.
+	if u, err := url.Parse(o.PushURL); err != nil {
+		e.addf("-push-url %q: %v", o.PushURL, err)
+	} else if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		e.addf("-push-url %q: want a full URL, e.g. http://vm:8428/opentelemetry/v1/metrics", o.PushURL)
+	}
+	if o.PushTimeout <= 0 {
+		e.addf("-push-timeout must be positive; it bounds one send and the request inside it")
+	}
+	if o.PushBuffer <= 0 {
+		e.addf("-push-buffer counts cycles and must be positive; 0 would be read as the default of %d rather than as no buffer",
+			push.DefaultBuffer)
+	}
+	// A cycle ends with the push it feeds, so the interval has to hold both.
+	if o.Timeout+o.PushTimeout >= o.Interval {
+		e.addf("-timeout (%s) plus -push-timeout (%s) is not below -interval (%s); cycles would drift",
+			o.Timeout, o.PushTimeout, o.Interval)
+	}
+}
+
+// pusher is the sender as the hook uses it, testable without an OTLP client.
+type pusher interface {
+	Push(ctx context.Context, takenAt time.Time) error
+}
+
+// pollerConfig is the only place an exporter.Config is built, and sets every
+// field. OnCycle hangs on the same predicate that built sender.
+func pollerConfig(o *options, sender pusher) exporter.Config {
+	cfg := exporter.Config{
 		Interval:         o.Interval,
 		Timeout:          o.Timeout,
 		MinBackoff:       o.MinBackoff,
@@ -241,19 +379,93 @@ func pollerConfig(o *options) exporter.Config {
 		SessionRenew:     o.SessionRenew,
 		MaxLoginsPerHour: exporter.DefaultMaxLoginsPerHour,
 	}
+	if o.pushMode() {
+		cfg.OnCycle = pushCycle(sender)
+	}
+	return cfg
 }
 
-// startupAttrs is what the starting line carries. It lives out here because main
-// is the seam the package tests cannot reach, and the build leads because a
-// crash-looping container is read from the top of its log.
+// pushCycle hands each cycle to the sender. The error is dropped: Sender has
+// logged it already, once per outage rather than once per cycle.
+func pushCycle(sender pusher) func(context.Context, time.Time) {
+	return func(ctx context.Context, takenAt time.Time) {
+		_ = sender.Push(ctx, takenAt)
+	}
+}
+
+// pushConfig is the only place a push.Config is built, and sets every field.
+// job and instance are what a scrape would have added, and a -push-label of the
+// same name replaces them; instance is the router, the thing being watched.
+func pushConfig(o *options, host string, labels map[string]string) push.Config {
+	all := map[string]string{"job": pushJob, "instance": host}
+	maps.Copy(all, labels)
+	return push.Config{
+		Endpoint: o.PushURL,
+		Labels:   all,
+		Resource: map[string]string{"service.name": pushJob, "service.instance.id": host},
+		Headers:  nil, // no flag fills it; push.Config says what it is reserved for
+		Buffer:   o.PushBuffer,
+		Timeout:  o.PushTimeout,
+	}
+}
+
+// pushLabels splits the pairs into a map, reporting every malformed one.
+func pushLabels(l labelList, e *env) map[string]string {
+	labels := map[string]string{}
+	for _, raw := range strings.Split(l.pairs, labelSep) {
+		if raw == "" {
+			continue
+		}
+		name, value, ok := strings.Cut(raw, "=")
+		if !ok {
+			e.addf("-push-label %q: want name=value, e.g. -push-label site=home", raw)
+			continue
+		}
+		labels[name] = value
+	}
+	return labels
+}
+
+// metricsServer is the pull-mode listener, nil in push mode. /metrics gathers
+// both registries, the one place the split shows.
+func metricsServer(o *options, build exporter.BuildInfo, snapshot, process *prometheus.Registry) *http.Server {
+	if o.pushMode() {
+		return nil
+	}
+	mux := http.NewServeMux()
+	mux.Handle("GET /metrics", promhttp.HandlerFor(prometheus.Gatherers{snapshot, process}, promhttp.HandlerOpts{
+		ErrorHandling: promhttp.ContinueOnError,
+		ErrorLog:      logAdapter{},
+		Registry:      process, // counts scrape errors; they describe this process, not the router
+	}))
+	mux.HandleFunc("GET /{$}", landing(o.Interval, build))
+
+	return &http.Server{
+		Addr:              o.Listen,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+}
+
+// startupAttrs is what the starting line carries. The build leads because a
+// crash-looping container is read from the top of its log; in push mode the
+// tail names the receiver instead of the listener.
 func startupAttrs(o *options, b exporter.BuildInfo, host string) []any {
-	return []any{
+	attrs := []any{
 		"version", b.Version, "revision", b.Revision,
 		"host", host, "user", o.User, "password_from", passwordSource(o.PasswordFile),
-		"listen", o.Listen, "interval", o.Interval, "timeout", o.Timeout,
+		"interval", o.Interval, "timeout", o.Timeout,
 		"request_timeout", o.RequestTimeout, "min_backoff", o.MinBackoff, "max_backoff", o.MaxBackoff,
 		"session_cooldown", o.SessionCooldown, "session_renew", o.SessionRenew,
 	}
+	if !o.pushMode() {
+		return append(attrs, "listen", o.Listen)
+	}
+	return append(attrs, "push_url", o.PushURL, "push_labels", o.PushLabels.String(),
+		"push_buffer", o.PushBuffer, "push_timeout", o.PushTimeout)
 }
 
 // landing serves two paragraphs at / , one linking /metrics. The build's strings
@@ -346,6 +558,19 @@ func (e *env) str(key, def string) string {
 		return v
 	}
 	return def
+}
+
+func (e *env) num(key string, def int) int {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		e.errs = append(e.errs, fmt.Errorf("%s=%q: not a whole number, e.g. 300", key, v))
+		return def
+	}
+	return n
 }
 
 func (e *env) dur(key string, def time.Duration) time.Duration {

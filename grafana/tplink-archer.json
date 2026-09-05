@@ -5366,7 +5366,7 @@
       "id": 54,
       "type": "timeseries",
       "title": "Exporter faults, last hour",
-      "description": "tplink_scrape_errors_total carries one series per endpoint that has failed, so it is absent entirely while none has — an empty line here is the healthy reading, not a broken query. Logins suppressed counts attempts held back by the cooldown or the hourly cap.",
+      "description": "tplink_scrape_errors_total carries one series per endpoint that has failed, so it is absent entirely while none has — an empty line here is the healthy reading, not a broken query. Logins suppressed counts attempts held back by the cooldown, the hourly cap or the backoff.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"

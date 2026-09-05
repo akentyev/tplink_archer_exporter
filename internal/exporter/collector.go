@@ -22,7 +22,7 @@ var (
 	descLogins           = prometheus.NewDesc("tplink_login_total", "Successful logins since start.", nil, nil)
 	descLoginFailures    = prometheus.NewDesc("tplink_login_failed_total", "Failed logins since start, session conflicts included.", nil, nil)
 	descSessionsLost     = prometheus.NewDesc("tplink_session_lost_total", "Sessions the exporter concluded it had lost, since start. Someone opening the web UI is the usual cause; a reboot or an upgrade reads the same.", nil, nil)
-	descLoginsSuppressed = prometheus.NewDesc("tplink_login_suppressed_total", "Logins not attempted since start, either during the cooldown after losing the session or against the hourly cap.", nil, nil)
+	descLoginsSuppressed = prometheus.NewDesc("tplink_login_suppressed_total", "Logins not attempted since start: during the cooldown after losing the session, against the hourly cap, or inside the backoff after a failed cycle.", nil, nil)
 	descSnapshotTime     = prometheus.NewDesc("tplink_snapshot_timestamp_seconds", "Unix time of the snapshot being served; its age is time() minus this.", nil, nil)
 	descFailedSources    = prometheus.NewDesc("tplink_endpoints_failed", "Endpoints that did not answer in the cycle behind the snapshot being served.", nil, nil)
 
