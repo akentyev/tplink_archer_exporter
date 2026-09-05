@@ -663,7 +663,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "count(tplink_vpn_tunnel_up{instance=~\"$instance\"} == 0) or vector(0)",
+          "expr": "count(tplink_vpn_tunnel_up{instance=~\"$instance\"} == 0) or (0 * count(tplink_vpn_tunnel_up{instance=~\"$instance\"}))",
           "refId": "A",
           "range": true,
           "instant": false,
@@ -734,7 +734,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "count(tplink_arp_entry_info{instance=~\"$instance\"} unless on (mac, instance) tplink_client_info{instance=~\"$instance\"}) or vector(0)",
+          "expr": "count(tplink_arp_entry_info{instance=~\"$instance\"} unless on (mac, instance) tplink_client_info{instance=~\"$instance\"}) or (0 * count(tplink_arp_entry_info{instance=~\"$instance\"}))",
           "refId": "A",
           "range": true,
           "instant": false,
@@ -1031,7 +1031,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "count(tplink_port_speed_mbits{instance=~\"$instance\"} < 1000 and on (port, instance) tplink_port_link{instance=~\"$instance\"} == 1) or vector(0)",
+          "expr": "count(tplink_port_speed_mbits{instance=~\"$instance\"} < 1000 and on (port, instance) tplink_port_link{instance=~\"$instance\"} == 1) or (0 * count(tplink_port_speed_mbits{instance=~\"$instance\"}))",
           "refId": "A",
           "range": true,
           "instant": false,
@@ -3849,7 +3849,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "count(tplink_dhcp_lease_permanent{instance=~\"$instance\"} == 1) or vector(0)",
+          "expr": "count(tplink_dhcp_lease_permanent{instance=~\"$instance\"} == 1) or (0 * count(tplink_dhcp_lease_permanent{instance=~\"$instance\"}))",
           "refId": "A",
           "range": true,
           "instant": false,
@@ -3917,7 +3917,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "count(tplink_dhcp_reservation{instance=~\"$instance\"} == 1) or vector(0)",
+          "expr": "count(tplink_dhcp_reservation{instance=~\"$instance\"} == 1) or (0 * count(tplink_dhcp_reservation{instance=~\"$instance\"}))",
           "refId": "A",
           "range": true,
           "instant": false,
@@ -3985,7 +3985,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "count(tplink_dhcp_lease_expiry_seconds{instance=~\"$instance\"} - time() < 1800) or vector(0)",
+          "expr": "count(tplink_dhcp_lease_expiry_seconds{instance=~\"$instance\"} - time() < 1800) or (0 * count(tplink_dhcp_lease_expiry_seconds{instance=~\"$instance\"}))",
           "refId": "A",
           "range": true,
           "instant": false,
