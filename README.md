@@ -151,6 +151,10 @@ both are set. `-version` asks a question rather than setting anything, so it has
 | `-max-backoff`      | `TPLINK_MAX_BACKOFF`      | `15m`            | ceiling for the backoff and the cooldown         |
 | `-session-cooldown` | `TPLINK_SESSION_COOLDOWN` | `5m`             | stay away once losing the session repeats        |
 | `-session-renew`    | `TPLINK_SESSION_RENEW`    | `30m`            | replace the session on a schedule; 0 disables it |
+| `-push-url`         | `TPLINK_PUSH_URL`         | —                | OTLP receiver; push mode, and no listener at all |
+| `-push-label`       | `TPLINK_PUSH_LABELS`      | —                | repeatable `name=value`; comma-separated in env  |
+| `-push-buffer`      | `TPLINK_PUSH_BUFFER`      | `300`            | cycles kept unsent while the receiver is down    |
+| `-push-timeout`     | `TPLINK_PUSH_TIMEOUT`     | `10s`            | one send, its drain of the buffer included       |
 | `-log-level`        | `TPLINK_LOG_LEVEL`        | `info`           | debug, info, warn, error                         |
 | `-version`          | —                         | —                | print the version and exit                       |
 | —                   | `TZ`                      | the host's       | the zone the router's wall clock is read in      |
@@ -247,6 +251,89 @@ difference between the two zones and calls it drift.
 What did not answer is absent rather than zero. A missing `status?form=internet`
 publishes no `tplink_wan_status` at all, instead of a 0 that reads as "the internet is down"; the same holds for the
 security flags, where a 0 nobody read would be worse.
+
+### Push mode
+
+`-push-url` is the second way to deliver metrics, an alternative to `/metrics` rather than a replacement for it: set it
+and the exporter sends every cycle's snapshot as OTLP/HTTP to a receiver instead of serving it, and no HTTP listener
+starts at all — `-listen` answers nothing while a push URL is set. Pull needs something to reach the exporter, which on
+a workstation-plus-datacenter setup means `0.0.0.0:9110` open to the exporter's whole segment; push makes only the
+outbound connection.
+
+A push goes out **after every cycle, including a failed one** — a router that stopped answering has to look different
+from an exporter that did, so `tplink_up 0` and the error counters travel exactly when the router does not. The
+snapshot's points carry `Snapshot.TakenAt`, the moment the router answered (or the cycle's start, when it never did),
+not the moment the batch left. Process metrics (`go_*`, `process_*`) travel too, as a second OTLP body stamped with the
+send time instead — they describe "now", and buffering an hour-old goroutine count would describe a moment already
+gone.
+
+`job` and `instance` are not something the exporter emits in pull mode; a scraper adds both, from its own config, to
+everything it reads back, `go_*`/`process_*` included. Push has no scraper, so the exporter adds them itself, as
+attributes on every point of both bodies: `job` defaults to `tplink_exporter`, `instance` to the router's address as
+the client holds it, scheme included — a bare `-host 192.168.0.1` becomes `http://192.168.0.1` by the time anything
+labels a point, since that is what the client prepends before its first request, not the flag's own text. That is the
+reverse of pull, where `instance` is the address of the exporter a scraper reached — **switching mode changes what
+`instance` means and splits a series' history across the change**, the same series suddenly reporting under two
+different `instance` values with no overlap, and a dashboard variable or alert written against the bare address
+matches nothing until it accounts for the scheme. `-push-label name=value`, repeatable, adds anything else
+(`env=prod`, `site=home`); one named `job` or `instance` overrides the default instead of adding a second label.
+
+**Alerting is not the same in push, because `tplink_up` still describes the router, not the exporter.** A dead
+exporter simply stops sending, so nothing ever reports `tplink_up 0` — there is no scrape to fail and no process to be
+missing from it. Watch the data instead: `time() - tplink_push_last_success_timestamp_seconds`, or
+`absent_over_time(tplink_up[...])` — and **size that window against `-max-backoff`, not against a few cycles**. A push
+rides the poller's cycle, and a login the router refused or never answered arms the poller's backoff, which replaces
+the interval rather than adding to it: at the defaults an unreachable router thins the sends out to one every 1, 2, 4,
+8 and then 15 minutes, for as long as it stays unreachable. A window a few cycles wide therefore fires on the router's
+outage rather than the exporter's, and `tplink_up 0` goes stale between the samples that still carry it; a window above
+`-max-backoff` — `20m` against the default `15m` — waits for a real silence. `tplink_session_blocked` rides the same
+backoff, since a browser holding the session is a refused login like any other; what keeps the `-interval` rhythm is the
+cooldown after a session taken from the exporter mid-cycle, and only that. The pull alert, `tplink_up == 0 unless
+tplink_session_blocked == 1`, still means exactly what it always meant — the router is unreachable — it just stops
+doubling as the exporter's own health check.
+
+A receiver that is down does not cost a cycle: up to `-push-buffer` snapshots (300 by default, five hours of history at
+the 60s default interval) wait in memory, oldest first, and go out with their **original** cycle timestamps once the
+receiver answers again — read correctly by anything that keeps the timestamp it was sent, rather than substituting the
+time of receipt. What does not fit is dropped and counted, never silently: `tplink_push_dropped_total` is batches
+evicted from a full buffer or refused outright by the receiver. Watching an outage through the metrics themselves:
+`tplink_push_buffered` climbs and `tplink_push_total{result="failed"}` grows by one a cycle while it lasts; the
+receiver's answer, once it comes back, arrives as `tplink_push_total{result="ok"}` jumping by the whole drained batch
+in one step rather than one at a time, and `tplink_push_last_success_timestamp_seconds` keeps the time of the last
+success before the gap until that jump.
+
+`-push-timeout` bounds one send, the buffer's drain included, and the individual HTTP request inside it — one value,
+two ceilings, so it cannot be zero: that would remove both at once.
+
+Shutdown in push mode chains three separate waits, not one. The poller's last cycle still owes it a push — buffer
+drain included — capped by `-push-timeout`; its own deferred logout runs next, capped by whichever of `-timeout` and
+`-request-timeout` is smaller; only after both does a second, final drain of whatever that push could not deliver run,
+capped by a fixed ten seconds that does **not** scale with `-push-timeout`. At default timeouts that is up to thirty
+seconds end to end, not the ten `docker stop` waits by default before killing the process. That number is not new:
+`docker-compose.yml` in this repository has carried `stop_grace_period: 30s` since its first commit, well before push
+mode existed, sized for the logout alone against a configurable `-timeout`/`-request-timeout` — it happens to also
+cover push's three-part chain at the defaults, but raising `-push-timeout` grows the chain while that fixed ten
+seconds does not shrink to compensate, so the margin narrows; raise `stop_grace_period` by the same amount alongside
+it.
+
+Point `-push-url` at a receiver's OTLP/HTTP metrics endpoint, `/opentelemetry/v1/metrics` on VictoriaMetrics:
+
+```bash
+docker run -d --rm -p 8428:8428 victoriametrics/victoria-metrics:latest \
+  -opentelemetry.promoteAllResourceAttributes=false \
+  -opentelemetry.promoteScopeMetadata=false
+./bin/tplink_exporter -host 192.168.0.1 \
+  -push-url http://127.0.0.1:8428/opentelemetry/v1/metrics
+```
+
+The two receiver flags keep the series clean: without them each row also carries `scope.name`, `scope.version`,
+`service.name` and `service.instance.id`, promoted from OTLP resource and scope metadata into ordinary labels — none of
+it needed, since `job` and `instance` already carry what those would say. Confirmed against
+`victoriametrics/victoria-metrics:latest`: rows land with `job`, `instance` and the cycle's timestamp and nothing else;
+process metrics carry the same two labels, stamped with the send time instead; a receiver stopped for several cycles
+and brought back received the buffered batches first, each with its original timestamp, landing on an instance that
+did not exist yet when those cycles ran; `tplink_push_dropped_total` stayed at zero throughout; and nothing answered on
+`-listen` for the whole run.
 
 ## Dashboard
 

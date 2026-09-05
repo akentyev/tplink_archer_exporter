@@ -84,6 +84,13 @@ type Config struct {
 	// login" lock that disables the router for two hours, and this device
 	// certifies into the group that has it.
 	MaxLoginsPerHour int
+
+	// OnCycle runs after every cycle, failed ones included, once the state is
+	// published: what it reads is this cycle's data. Nil is pull mode. takenAt is
+	// the snapshot's time when the cycle published one, the cycle start otherwise.
+	// ctx has Run's cancellation removed; the callee bounds its own time, which
+	// comes out of the wait before the next cycle.
+	OnCycle func(ctx context.Context, takenAt time.Time)
 }
 
 // lossWindow is how far back a lost session still counts as a repeat, and how
@@ -197,7 +204,11 @@ func (p *Poller) Run(ctx context.Context) error {
 
 	for {
 		start := time.Now()
-		wait := p.cycle(ctx)
+		wait, takenAt := p.cycle(ctx)
+		// Before the cancellation check: the cycle a shutdown cut short still travels.
+		if p.cfg.OnCycle != nil {
+			p.cfg.OnCycle(context.WithoutCancel(ctx), takenAt)
+		}
 		if ctx.Err() != nil {
 			return nil
 		}
@@ -224,8 +235,8 @@ func (p *Poller) State() State {
 }
 
 // cycle logs in if needed, polls once, and returns how long to wait before the
-// next attempt.
-func (p *Poller) cycle(ctx context.Context) time.Duration {
+// next attempt and the time this cycle's data carries, for Config.OnCycle.
+func (p *Poller) cycle(ctx context.Context) (time.Duration, time.Time) {
 	start := time.Now()
 	ctx, cancel := context.WithTimeout(ctx, p.cfg.Timeout)
 	defer cancel()
@@ -235,7 +246,7 @@ func (p *Poller) cycle(ctx context.Context) time.Duration {
 		p.failing = nil
 		p.suppress(start, why == holdSessionTaken)
 		slog.Info("not logging in", "why", why, "retry_in", wait)
-		return wait
+		return wait, start
 	}
 
 	if err := p.login(ctx); err != nil {
@@ -245,7 +256,7 @@ func (p *Poller) cycle(ctx context.Context) time.Duration {
 		wait := p.growBackoff()
 		slog.Warn("login failed", "err", err, "retry_in", wait,
 			"session_blocked", errors.Is(err, tpapi.ErrSessionBusy))
-		return wait
+		return wait, start
 	}
 
 	snap, gathered, err := p.poll(ctx)
@@ -273,7 +284,7 @@ func (p *Poller) cycle(ctx context.Context) time.Duration {
 		p.reportEndpoints(snap.Errors)
 		slog.Debug("polled", "took", time.Since(start), "failed_endpoints", len(snap.Errors))
 		p.renew(ctx)
-		return p.cfg.Interval
+		return p.cfg.Interval, snap.TakenAt
 
 	case ctx.Err() != nil:
 		// Our own deadline, not the router's doing. One endpoint that never
@@ -285,7 +296,7 @@ func (p *Poller) cycle(ctx context.Context) time.Duration {
 		p.record(start, snap, gathered, err, false)
 		wait := p.growBackoff()
 		slog.Warn("the cycle ran out of time", "err", err, "retry_in", wait)
-		return wait
+		return wait, publishedAt(snap, gathered, start)
 
 	default:
 		// Nothing answered, or the router said the session is gone. The firmware
@@ -296,8 +307,17 @@ func (p *Poller) cycle(ctx context.Context) time.Duration {
 		p.failing = nil
 		wait, blocked := p.sessionLost()
 		p.record(start, snap, gathered, err, blocked)
-		return wait
+		return wait, publishedAt(snap, gathered, start)
 	}
+}
+
+// publishedAt is the time a cycle's data carries. The condition is record's, so
+// a push and a scrape cannot disagree about which snapshot is current.
+func publishedAt(snap *Snapshot, gathered int, start time.Time) time.Time {
+	if snap != nil && gathered > 0 {
+		return snap.TakenAt
+	}
+	return start
 }
 
 // holdOff reports how long to wait before the next cycle and why the login is
