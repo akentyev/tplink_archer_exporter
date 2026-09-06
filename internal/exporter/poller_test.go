@@ -1672,18 +1672,9 @@ func TestHoldReasonsKeepTheirOrder(t *testing.T) {
 			p := NewPoller(newFakeRouter(t), cfg)
 			tc.set(p)
 
-			wait, why := p.holdOff(now)
-			if why != tc.want {
+			if why := p.holdOff(now); why != tc.want {
 				t.Errorf("holdOff reports %q, want %q; the reason is what an operator reads off the log "+
 					"line, and the three are not equally serious", why, tc.want)
-			}
-			want := cfg.Interval
-			if tc.want == "" {
-				want = 0
-			}
-			if wait != want {
-				t.Errorf("holdOff asks for %v, want %v; a hold returns the interval rather than what is "+
-					"left of it, so the cycle keeps its rhythm and its counters", wait, want)
 			}
 		})
 	}
@@ -2602,11 +2593,9 @@ func TestHourlyLoginCapHolds(t *testing.T) {
 	})
 }
 
-// The cap withholds one login and returns Interval, so the ticker keeps its
-// rhythm and the cap is re-read each cycle. Returning what was left of the hour
-// slept it out in one piece: State froze for up to an hour, and
-// tplink_login_suppressed_total counted one spell here against one cycle on the
-// cooldown path — two units in one counter.
+// The cap withholds one login per cycle, so State keeps moving and the cap is
+// re-read. tplink_login_suppressed_total counts cycles: a spell held here and
+// one held on the cooldown path have to be the same unit.
 func TestLoginCapKeepsTheTickerRunning(t *testing.T) {
 	rt := newFakeRouter(t)
 	rt.refuseLogin(errors.New("dial tcp 192.0.2.1:80: connect: connection refused"))
@@ -4345,6 +4334,90 @@ func TestOnCycleRunsWhileTheLoginIsHeldBack(t *testing.T) {
 				got[n-1].TakenAt)
 		}
 	})
+}
+
+// The refused login is TestOnCycleKeepsTheIntervalThroughTheBackoff. Both
+// bounds are reached exactly by the cycle that runs out of time: gaps of 20,
+// 30 and 40 against an interval of 30, so a failure is latency, not rhythm.
+func TestOnCycleKeepsTheIntervalWhateverEndedTheCycle(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(*fakeRouter)
+		// measured fails the case unless the outage actually happened.
+		measured func(t *testing.T, st State, rt *fakeRouter, window time.Duration)
+	}{
+		{
+			name:  "the session is taken again and again",
+			setup: func(rt *fakeRouter) { rt.expireAtEvery(srcPorts) },
+			measured: func(t *testing.T, st State, rt *fakeRouter, window time.Duration) {
+				t.Helper()
+				if !st.SessionBlocked || st.LoginsSuppressed == 0 {
+					t.Fatalf("after %v: SessionBlocked=%v, LoginsSuppressed=%d, SessionsLost=%d; the cooldown has "+
+						"to be armed, with cycles held inside it, for the rhythm below to be the one kept while "+
+						"the login is withheld", window, st.SessionBlocked, st.LoginsSuppressed, st.SessionsLost)
+				}
+			},
+		},
+		{
+			name:  "the cycle runs out of time",
+			setup: func(rt *fakeRouter) { rt.block(sources[0].Path) },
+			measured: func(t *testing.T, st State, rt *fakeRouter, window time.Duration) {
+				t.Helper()
+				if logins := len(rt.loginTimes()); !errors.Is(st.LastErr, context.DeadlineExceeded) || logins < 2 {
+					t.Fatalf("after %v: LastErr=%v over %d logins; %s never answers, so the cycles measured below "+
+						"have to be ones that spent all of Config.Timeout, and more than one of them",
+						window, st.LastErr, logins, sources[0].Path)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rt := newFakeRouter(t)
+			tc.setup(rt)
+			cfg := testConfig()
+			var hook cycleHook
+			cfg.OnCycle = hook.fn()
+
+			synctest.Test(t, func(t *testing.T) {
+				p, stop := startPoller(t, rt, cfg)
+				defer stop()
+
+				// Ten intervals: the cooldown is armed by the second cycle and
+				// the backoff reaches its cap by the ninth, so the window holds
+				// both, and a send that came rarely would show.
+				window := 10 * cfg.Interval
+				time.Sleep(window)
+				synctest.Wait()
+				st, got := p.State(), hook.records()
+				tc.measured(t, st, rt, window)
+
+				// A cycle ends within Timeout of its start, so every cycle that
+				// began inside the window has reached the hook.
+				if want := int(window / cfg.Interval); len(got) < want {
+					t.Errorf("the hook ran %d times over %v at an interval of %v, want at least %d; the sends are "+
+						"what tell a router that stopped answering from an exporter that did, and README sizes "+
+						"the alert on a silent exporter against three or four intervals on the promise that "+
+						"they keep coming through an outage", len(got), window, cfg.Interval, want)
+				}
+				for i := 1; i < len(got); i++ {
+					gap := got[i].At.Sub(got[i-1].At)
+					if gap > cfg.Interval+cfg.Timeout {
+						t.Errorf("send %d came %v after the one before it, past the interval of %v plus the cycle's "+
+							"own %v; the failure sets when the next login is tried, not when the next cycle runs. "+
+							"A gap wider than the interval in an outage is exactly what the alert on a silent "+
+							"exporter fires on, so the router's trouble reads downstream as the exporter's",
+							i+1, gap, cfg.Interval, cfg.Timeout)
+					}
+					if gap < cfg.Interval-cfg.Timeout {
+						t.Errorf("send %d came %v after the one before it, short of the interval of %v by more than "+
+							"the cycle's own %v; a failed cycle is not retried sooner, or the poller goes at a "+
+							"router already in trouble, or a person at its web UI, faster than at a healthy one",
+							i+1, gap, cfg.Interval, cfg.Timeout)
+					}
+				}
+			})
+		})
+	}
 }
 
 // lastCallBefore and firstCallAfter bracket a moment in the call log: what the
