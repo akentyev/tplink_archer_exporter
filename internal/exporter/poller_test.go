@@ -4408,3 +4408,54 @@ func operationFor(path string) (string, bool) {
 	src, ok := sourceFixture[path]
 	return src.operation, ok
 }
+
+// The cancellation is the poller's own, so nothing is warned about and no
+// backoff is armed.
+func TestShutdownDuringTheLoginIsNotAFailedLogin(t *testing.T) {
+	logged := captureLog(t, slog.LevelInfo)
+	rt := newFakeRouter(t)
+	rt.hangLogin()
+	cfg := testConfig()
+
+	synctest.Test(t, func(t *testing.T) {
+		p := NewPoller(rt, cfg)
+		ctx, cancel := context.WithCancel(t.Context())
+		done := make(chan error, 1)
+		go func() { done <- p.Run(ctx) }()
+
+		time.Sleep(cfg.Timeout / 2)
+		synctest.Wait()
+		if attempts, st := len(rt.loginTimes()), p.State(); attempts != 1 || !st.LastAttempt.IsZero() {
+			t.Fatalf("%v into the first cycle the poller is not sitting in its one login: %d attempts, "+
+				"LastErr=%v; the shutdown below has to land in the login, before Config.Timeout of %v ends "+
+				"the cycle on its own", cfg.Timeout/2, attempts, st.LastErr, cfg.Timeout)
+		}
+		cancel()
+
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Errorf("Run returned %v; a cancelled context is a clean shutdown and reports nil", err)
+			}
+		case <-time.After(time.Minute):
+			t.Fatal("Run did not return after its context was cancelled")
+		}
+
+		if recs := logged.records("login failed"); len(recs) != 0 {
+			t.Errorf("the shutdown was reported as a failed login:\n%s\nREADME reads that line as a held "+
+				"session, a wrong password or an unreachable router; a docker stop is none of them",
+				strings.Join(recs, "\n"))
+		}
+		warned := append(logged.records("level=WARN"), logged.records("level=ERROR")...)
+		if len(warned) != 0 {
+			t.Errorf("%d records at warn or above from a shutdown that landed mid-login; README promises "+
+				"that at info a healthy exporter is quiet, one starting line and nothing more, and a warning "+
+				"on every docker stop breaks exactly that. Log:\n%s", len(warned), logged)
+		}
+		if !p.loginAfter.IsZero() {
+			t.Errorf("the cancelled login armed the backoff, holding the next login back for %v; the "+
+				"exporter is stopping and there is no next cycle to hold, so the wait only says the shutdown "+
+				"was taken for a refused login", time.Until(p.loginAfter))
+		}
+	})
+}

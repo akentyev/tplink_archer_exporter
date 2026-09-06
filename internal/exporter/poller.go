@@ -241,6 +241,9 @@ func (p *Poller) State() State {
 // next attempt and the time this cycle's data carries, for Config.OnCycle.
 func (p *Poller) cycle(ctx context.Context) (time.Duration, time.Time) {
 	start := time.Now()
+	// Below the deadline, a cancelled parent and a spent Timeout are the same
+	// ctx.Err(), and they mean opposite things.
+	parent := ctx
 	ctx, cancel := context.WithTimeout(ctx, p.cfg.Timeout)
 	defer cancel()
 
@@ -253,6 +256,10 @@ func (p *Poller) cycle(ctx context.Context) (time.Duration, time.Time) {
 	}
 
 	if err := p.login(ctx); err != nil {
+		if parent.Err() != nil {
+			// A shutdown, not a refusal: nothing to retry.
+			return p.cfg.Interval, start
+		}
 		p.polledOK = false
 		p.failing = nil
 		p.record(start, nil, 0, err, false)
