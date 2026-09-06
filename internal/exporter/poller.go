@@ -300,7 +300,7 @@ func (p *Poller) cycle(ctx context.Context) (time.Duration, time.Time) {
 		p.reportEndpoints(snap.Errors)
 		slog.Debug("polled", "took", time.Since(start), "failed_endpoints", len(snap.Errors))
 		p.renew(ctx)
-		return p.cfg.Interval, snap.TakenAt
+		return p.cfg.Interval, publishedAt(snap, gathered, start)
 
 	case ctx.Err() != nil:
 		// Our own deadline, not the router's doing. One endpoint that never

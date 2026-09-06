@@ -4544,3 +4544,29 @@ func TestShutdownDuringThePollIsNotAFailedCycle(t *testing.T) {
 		})
 	}
 }
+
+func TestPublishedAtFollowsWhatRecordPublishes(t *testing.T) {
+	start := time.Date(2026, time.September, 7, 10, 0, 0, 0, time.UTC)
+	taken := start.Add(2 * time.Second)
+
+	for _, tc := range []struct {
+		name     string
+		snap     *Snapshot
+		gathered int
+		want     time.Time
+	}{
+		{"a snapshot that gathered something carries its own time", &Snapshot{TakenAt: taken}, 1, taken},
+		{"a snapshot that gathered nothing carries the cycle start", &Snapshot{TakenAt: taken}, 0, start},
+		{"no snapshot carries the cycle start", nil, 0, start},
+		{"a count without a snapshot carries the cycle start", nil, 3, start},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := publishedAt(tc.snap, tc.gathered, start); !got.Equal(tc.want) {
+				t.Errorf("publishedAt = %v, want %v with %d gathered; record publishes a snapshot only when it "+
+					"exists and gathered something, and the time handed to Config.OnCycle has to follow that same "+
+					"condition, or a push and a scrape would disagree about which snapshot is current",
+					got, tc.want, tc.gathered)
+			}
+		})
+	}
+}
