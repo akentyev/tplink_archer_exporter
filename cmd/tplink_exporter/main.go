@@ -73,15 +73,7 @@ func main() {
 
 	// Everything wrong with the configuration is collected and reported
 	// together. A start that names one fault costs a restart to learn the next.
-	logger, err := newLogger(o.LogLevel)
-	e.add(err)
-	validate(o, e)
-	// Parsed here so a malformed pair joins the same report as the other faults.
-	labels := pushLabels(o.PushLabels, e)
-	// no -password flag: a flag shows up in ps and in the
-	// container's process list.
-	password, err := readPassword(o.PasswordFile)
-	e.add(err)
+	logger, password, labels := configure(o, e)
 	if len(e.errs) > 0 {
 		for _, err := range e.errs {
 			errorf("%v", err)
@@ -322,12 +314,27 @@ func bindFlags(fs *flag.FlagSet, e *env) *options {
 	return o
 }
 
+// configure collects every configuration fault and returns what had to be read
+// on the way. The order of the report is set here; a TPLINK_* value that does
+// not parse is recorded earlier, in bindFlags.
+func configure(o *options, e *env) (*slog.Logger, string, map[string]string) {
+	logger, err := newLogger(o.LogLevel)
+	e.add(err)
+	// no -password flag: a flag shows up in ps and in the container's process
+	// list.
+	password, pwErr := readPassword(o.PasswordFile)
+	validate(o, e, pwErr)
+	labels := pushLabels(o.PushLabels, e)
+	return logger, password, labels
+}
+
 // validate records every fault at once. The -push-* rules apply in push mode
 // only: without a receiver they configure nothing.
-func validate(o *options, e *env) {
+func validate(o *options, e *env, pwErr error) {
 	if o.Host == "" {
 		e.addf("router address is required: -host or TPLINK_HOST, e.g. -host 192.168.0.1")
 	}
+	e.add(pwErr)
 	if o.SessionRenew < 0 {
 		e.addf("-session-renew cannot be negative; 0 switches the renewal off")
 	}
