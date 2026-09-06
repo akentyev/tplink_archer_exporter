@@ -4459,3 +4459,88 @@ func TestShutdownDuringTheLoginIsNotAFailedLogin(t *testing.T) {
 		}
 	})
 }
+
+// A cancelled request fails like any other, so a shutdown mid-poll looks like
+// a cycle that ran out of time or lost its endpoints — however much it had
+// gathered, which is what the two cases vary.
+func TestShutdownDuringThePollIsNotAFailedCycle(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		block int // index into sources of the one that never answers
+	}{
+		{"nothing gathered", 0},
+		{"half the set gathered", len(sources) / 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			logged := captureLog(t, slog.LevelInfo)
+			rt := newFakeRouter(t)
+			stuck := sources[tc.block].Path
+			rt.block(stuck)
+			cfg := testConfig()
+
+			synctest.Test(t, func(t *testing.T) {
+				start := time.Now()
+				p := NewPoller(rt, cfg)
+				ctx, cancel := context.WithCancel(t.Context())
+				done := make(chan error, 1)
+				go func() { done <- p.Run(ctx) }()
+
+				time.Sleep(cfg.Timeout / 2)
+				synctest.Wait()
+				if calls, st := rt.callLog(), p.State(); st.Logins != 1 || len(calls) != tc.block+1 || !st.LastAttempt.IsZero() {
+					t.Fatalf("%v into the first cycle the poller is not sitting in its poll on %s, past its login "+
+						"and the %d sources before it: %d logins, %d calls, LastErr=%v; the shutdown below has to "+
+						"land there, before Config.Timeout of %v ends the cycle on its own",
+						cfg.Timeout/2, stuck, tc.block, st.Logins, len(calls), st.LastErr, cfg.Timeout)
+				}
+				cancel()
+
+				select {
+				case err := <-done:
+					if err != nil {
+						t.Errorf("Run returned %v; a cancelled context is a clean shutdown and reports nil", err)
+					}
+				case <-time.After(time.Minute):
+					t.Fatal("Run did not return after its context was cancelled")
+				}
+				if spent := time.Since(start); spent >= cfg.Timeout {
+					t.Fatalf("Run came back %v after the cycle began, not before Config.Timeout of %v; the cycle "+
+						"ran out of time on its own, and whatever it logged is about that rather than the shutdown",
+						spent, cfg.Timeout)
+				}
+
+				var blamed []string
+				for _, msg := range []string{"the cycle ran out of time", truncatedMsg, endpointDeadMsg} {
+					blamed = append(blamed, logged.records(msg)...)
+				}
+				if len(blamed) != 0 {
+					t.Errorf("%d records blaming the router for the shutdown:\n%s\nREADME reads those lines as a "+
+						"sick router, a session gone mid-cycle and endpoints that stopped answering; every request "+
+						"behind them was cancelled by the exporter itself, so each is not noise but a wrong "+
+						"diagnosis, sending an operator to a router that did nothing wrong",
+						len(blamed), strings.Join(blamed, "\n"))
+				}
+				warned := append(logged.records("level=WARN"), logged.records("level=ERROR")...)
+				if len(warned) != 0 {
+					t.Errorf("%d records at warn or above from a shutdown that landed in the poll; README promises "+
+						"that at info a healthy exporter is quiet, one starting line and nothing more, and a "+
+						"warning on every docker stop breaks exactly that. Log:\n%s", len(warned), logged)
+				}
+				if st := p.State(); !st.LastAttempt.IsZero() || st.Snapshot != nil || len(st.EndpointErrors) != 0 {
+					t.Errorf("the cancelled cycle was recorded: attempt=%v, Up=%v, snapshot=%v, errors charged to %d "+
+						"endpoints; it is the poller's first cycle, so nothing else could have written State. In "+
+						"push mode that record is the last point sent before the stop: tplink_up would read %v and "+
+						"tplink_scrape_errors_total would rise on %d endpoints whose only failure is that the "+
+						"exporter cancelled their requests",
+						!st.LastAttempt.IsZero(), st.Up, st.Snapshot != nil, len(st.EndpointErrors), b2f(st.Up),
+						len(st.EndpointErrors))
+				}
+				if !p.loginAfter.IsZero() {
+					t.Errorf("the cancelled cycle armed the backoff, holding the next login back for %v; the "+
+						"exporter is stopping and there is no next cycle to hold, so the wait only says the "+
+						"shutdown was taken for a cycle that ran out of time", time.Until(p.loginAfter))
+				}
+			})
+		})
+	}
+}

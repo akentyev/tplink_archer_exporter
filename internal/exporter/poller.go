@@ -272,6 +272,11 @@ func (p *Poller) cycle(ctx context.Context) (time.Duration, time.Time) {
 
 	snap, gathered, err := p.poll(ctx)
 	switch {
+	case parent.Err() != nil:
+		// First in the switch: a cancel after one reply leaves poll with
+		// err == nil, which the success branch would record as a poll.
+		return p.cfg.Interval, start
+
 	case err == nil:
 		p.record(start, snap, gathered, nil, false)
 		// Only on the first success after a wait: the cooldown deliberately
