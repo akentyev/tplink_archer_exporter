@@ -207,7 +207,7 @@ func (p *Poller) Run(ctx context.Context) error {
 
 	for {
 		start := time.Now()
-		wait, takenAt := p.cycle(ctx)
+		takenAt := p.cycle(ctx)
 		// Before the cancellation check: the cycle a shutdown cut short still travels.
 		if p.cfg.OnCycle != nil {
 			p.cfg.OnCycle(context.WithoutCancel(ctx), takenAt)
@@ -215,10 +215,10 @@ func (p *Poller) Run(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return nil
 		}
-		// wait runs from the start of the cycle rather than its end, so a slow
-		// cycle eats into the sleep instead of pushing the next one out. One that
-		// outlasted the wait does not sleep at all.
-		timer := time.NewTimer(max(0, wait-time.Since(start)))
+		// The wait runs from the start of the cycle rather than its end, so a
+		// slow cycle eats into the sleep instead of pushing the next one out,
+		// and one that outlasted it does not sleep.
+		timer := time.NewTimer(max(0, p.cfg.Interval-time.Since(start)))
 		select {
 		case <-ctx.Done():
 			timer.Stop()
@@ -237,22 +237,29 @@ func (p *Poller) State() State {
 	return out
 }
 
-// cycle logs in if needed, polls once, and returns how long to wait before the
-// next attempt and the time this cycle's data carries, for Config.OnCycle.
-func (p *Poller) cycle(ctx context.Context) (time.Duration, time.Time) {
+// cycle logs in if needed, polls once, and returns the time this cycle's data
+// carries, for Config.OnCycle.
+func (p *Poller) cycle(ctx context.Context) time.Time {
 	start := time.Now()
+	// Below the deadline, a cancelled parent and a spent Timeout are the same
+	// ctx.Err(), and they mean opposite things.
+	parent := ctx
 	ctx, cancel := context.WithTimeout(ctx, p.cfg.Timeout)
 	defer cancel()
 
-	if wait, why := p.holdOff(start); why != "" {
+	if why := p.holdOff(start); why != "" {
 		p.polledOK = false
 		p.failing = nil
 		p.suppress(start, why == holdSessionTaken)
-		slog.Info("not logging in", "why", why, "next_cycle_in", wait)
-		return wait, start
+		slog.Info("not logging in", "why", why, "next_cycle_in", p.cfg.Interval)
+		return start
 	}
 
 	if err := p.login(ctx); err != nil {
+		if parent.Err() != nil {
+			// A shutdown, not a refusal: nothing to retry.
+			return start
+		}
 		p.polledOK = false
 		p.failing = nil
 		p.record(start, nil, 0, err, false)
@@ -260,11 +267,16 @@ func (p *Poller) cycle(ctx context.Context) (time.Duration, time.Time) {
 		p.loginAfter = start.Add(retry)
 		slog.Warn("login failed", "err", err, "retry_in", retry,
 			"session_blocked", errors.Is(err, tpapi.ErrSessionBusy))
-		return p.cfg.Interval, start
+		return start
 	}
 
 	snap, gathered, err := p.poll(ctx)
 	switch {
+	case parent.Err() != nil:
+		// First in the switch: a cancel after one reply leaves poll with
+		// err == nil, which the success branch would record as a poll.
+		return start
+
 	case err == nil:
 		p.record(start, snap, gathered, nil, false)
 		// Only on the first success after a wait: the cooldown deliberately
@@ -288,7 +300,7 @@ func (p *Poller) cycle(ctx context.Context) (time.Duration, time.Time) {
 		p.reportEndpoints(snap.Errors)
 		slog.Debug("polled", "took", time.Since(start), "failed_endpoints", len(snap.Errors))
 		p.renew(ctx)
-		return p.cfg.Interval, snap.TakenAt
+		return publishedAt(snap, gathered, start)
 
 	case ctx.Err() != nil:
 		// Our own deadline, not the router's doing. One endpoint that never
@@ -301,7 +313,7 @@ func (p *Poller) cycle(ctx context.Context) (time.Duration, time.Time) {
 		retry := p.growBackoff()
 		p.loginAfter = start.Add(retry)
 		slog.Warn("the cycle ran out of time", "err", err, "retry_in", retry)
-		return p.cfg.Interval, publishedAt(snap, gathered, start)
+		return publishedAt(snap, gathered, start)
 
 	default:
 		// Nothing answered, or the router said the session is gone. The firmware
@@ -310,9 +322,9 @@ func (p *Poller) cycle(ctx context.Context) (time.Duration, time.Time) {
 		p.polledOK = false
 		p.loggedIn = false
 		p.failing = nil
-		wait, blocked := p.sessionLost()
+		blocked := p.sessionLost()
 		p.record(start, snap, gathered, err, blocked)
-		return wait, publishedAt(snap, gathered, start)
+		return publishedAt(snap, gathered, start)
 	}
 }
 
@@ -325,28 +337,24 @@ func publishedAt(snap *Snapshot, gathered int, start time.Time) time.Time {
 	return start
 }
 
-// holdOff reports how long to wait before the next cycle and why the login is
-// being held back; "" means go ahead. A hold returns Interval rather than what
-// is left of it, so the cycle keeps its rhythm and counts.
-func (p *Poller) holdOff(now time.Time) (time.Duration, string) {
+// holdOff reports why the login is being held back; "" means go ahead.
+func (p *Poller) holdOff(now time.Time) string {
 	if p.loggedIn {
-		return 0, ""
+		return ""
 	}
 	if now.Before(p.quietUntil) {
-		return p.cfg.Interval, holdSessionTaken
+		return holdSessionTaken
 	}
 	if p.capReached(now) {
-		// Interval, not the remaining hour: holdOff is what enforces the cap, and
-		// sleeping the window out in one piece would freeze the counters with it.
-		return p.cfg.Interval, holdLoginCap
+		return holdLoginCap
 	}
 	// The logged reason is the first that applies, and this is the least serious
 	// of the three: the cooldown is a person at the web UI, the cap the
 	// firmware's two-hour lock, this only a router that did not answer.
 	if now.Before(p.loginAfter) {
-		return p.cfg.Interval, holdBackoff
+		return holdBackoff
 	}
-	return 0, ""
+	return ""
 }
 
 // sessionLost decides whether to come back or to stay away, and reports whether
@@ -358,7 +366,7 @@ func (p *Poller) holdOff(now time.Time) (time.Duration, string) {
 // measuring the gap made their think time the deciding factor, which told us
 // nothing about the router. So one loss in the window is an accident and costs
 // nothing; a second says someone wants this session more than we do.
-func (p *Poller) sessionLost() (time.Duration, bool) {
+func (p *Poller) sessionLost() bool {
 	now := time.Now()
 	p.lossHistory = within(p.lossHistory, now, lossWindow)
 	repeat := len(p.lossHistory) > 0
@@ -370,7 +378,7 @@ func (p *Poller) sessionLost() (time.Duration, bool) {
 
 	if !repeat {
 		slog.Warn("the session was taken; logging in again next cycle")
-		return p.cfg.Interval, false
+		return false
 	}
 
 	if p.cooldown == 0 {
@@ -383,9 +391,7 @@ func (p *Poller) sessionLost() (time.Duration, bool) {
 	p.quietUntil = now.Add(p.cooldown)
 	slog.Warn("the session was taken again; staying away so the web UI keeps it",
 		"quiet_for", p.cooldown)
-	// The ticker keeps its rhythm; holdOff is the one place that withholds a
-	// login, so every cycle inside the quiet spell is counted.
-	return p.cfg.Interval, true
+	return true
 }
 
 // within drops what is older than d, keeping the slice's storage.

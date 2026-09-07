@@ -1672,18 +1672,9 @@ func TestHoldReasonsKeepTheirOrder(t *testing.T) {
 			p := NewPoller(newFakeRouter(t), cfg)
 			tc.set(p)
 
-			wait, why := p.holdOff(now)
-			if why != tc.want {
+			if why := p.holdOff(now); why != tc.want {
 				t.Errorf("holdOff reports %q, want %q; the reason is what an operator reads off the log "+
 					"line, and the three are not equally serious", why, tc.want)
-			}
-			want := cfg.Interval
-			if tc.want == "" {
-				want = 0
-			}
-			if wait != want {
-				t.Errorf("holdOff asks for %v, want %v; a hold returns the interval rather than what is "+
-					"left of it, so the cycle keeps its rhythm and its counters", wait, want)
 			}
 		})
 	}
@@ -2602,11 +2593,9 @@ func TestHourlyLoginCapHolds(t *testing.T) {
 	})
 }
 
-// The cap withholds one login and returns Interval, so the ticker keeps its
-// rhythm and the cap is re-read each cycle. Returning what was left of the hour
-// slept it out in one piece: State froze for up to an hour, and
-// tplink_login_suppressed_total counted one spell here against one cycle on the
-// cooldown path — two units in one counter.
+// The cap withholds one login per cycle, so State keeps moving and the cap is
+// re-read. tplink_login_suppressed_total counts cycles: a spell held here and
+// one held on the cooldown path have to be the same unit.
 func TestLoginCapKeepsTheTickerRunning(t *testing.T) {
 	rt := newFakeRouter(t)
 	rt.refuseLogin(errors.New("dial tcp 192.0.2.1:80: connect: connection refused"))
@@ -4347,6 +4336,90 @@ func TestOnCycleRunsWhileTheLoginIsHeldBack(t *testing.T) {
 	})
 }
 
+// The refused login is TestOnCycleKeepsTheIntervalThroughTheBackoff. Both
+// bounds are reached exactly by the cycle that runs out of time: gaps of 20,
+// 30 and 40 against an interval of 30, so a failure is latency, not rhythm.
+func TestOnCycleKeepsTheIntervalWhateverEndedTheCycle(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(*fakeRouter)
+		// measured fails the case unless the outage actually happened.
+		measured func(t *testing.T, st State, rt *fakeRouter, window time.Duration)
+	}{
+		{
+			name:  "the session is taken again and again",
+			setup: func(rt *fakeRouter) { rt.expireAtEvery(srcPorts) },
+			measured: func(t *testing.T, st State, rt *fakeRouter, window time.Duration) {
+				t.Helper()
+				if !st.SessionBlocked || st.LoginsSuppressed == 0 {
+					t.Fatalf("after %v: SessionBlocked=%v, LoginsSuppressed=%d, SessionsLost=%d; the cooldown has "+
+						"to be armed, with cycles held inside it, for the rhythm below to be the one kept while "+
+						"the login is withheld", window, st.SessionBlocked, st.LoginsSuppressed, st.SessionsLost)
+				}
+			},
+		},
+		{
+			name:  "the cycle runs out of time",
+			setup: func(rt *fakeRouter) { rt.block(sources[0].Path) },
+			measured: func(t *testing.T, st State, rt *fakeRouter, window time.Duration) {
+				t.Helper()
+				if logins := len(rt.loginTimes()); !errors.Is(st.LastErr, context.DeadlineExceeded) || logins < 2 {
+					t.Fatalf("after %v: LastErr=%v over %d logins; %s never answers, so the cycles measured below "+
+						"have to be ones that spent all of Config.Timeout, and more than one of them",
+						window, st.LastErr, logins, sources[0].Path)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rt := newFakeRouter(t)
+			tc.setup(rt)
+			cfg := testConfig()
+			var hook cycleHook
+			cfg.OnCycle = hook.fn()
+
+			synctest.Test(t, func(t *testing.T) {
+				p, stop := startPoller(t, rt, cfg)
+				defer stop()
+
+				// Ten intervals: the cooldown is armed by the second cycle and
+				// the backoff reaches its cap by the ninth, so the window holds
+				// both, and a send that came rarely would show.
+				window := 10 * cfg.Interval
+				time.Sleep(window)
+				synctest.Wait()
+				st, got := p.State(), hook.records()
+				tc.measured(t, st, rt, window)
+
+				// A cycle ends within Timeout of its start, so every cycle that
+				// began inside the window has reached the hook.
+				if want := int(window / cfg.Interval); len(got) < want {
+					t.Errorf("the hook ran %d times over %v at an interval of %v, want at least %d; the sends are "+
+						"what tell a router that stopped answering from an exporter that did, and README sizes "+
+						"the alert on a silent exporter against three or four intervals on the promise that "+
+						"they keep coming through an outage", len(got), window, cfg.Interval, want)
+				}
+				for i := 1; i < len(got); i++ {
+					gap := got[i].At.Sub(got[i-1].At)
+					if gap > cfg.Interval+cfg.Timeout {
+						t.Errorf("send %d came %v after the one before it, past the interval of %v plus the cycle's "+
+							"own %v; the failure sets when the next login is tried, not when the next cycle runs. "+
+							"A gap wider than the interval in an outage is exactly what the alert on a silent "+
+							"exporter fires on, so the router's trouble reads downstream as the exporter's",
+							i+1, gap, cfg.Interval, cfg.Timeout)
+					}
+					if gap < cfg.Interval-cfg.Timeout {
+						t.Errorf("send %d came %v after the one before it, short of the interval of %v by more than "+
+							"the cycle's own %v; a failed cycle is not retried sooner, or the poller goes at a "+
+							"router already in trouble, or a person at its web UI, faster than at a healthy one",
+							i+1, gap, cfg.Interval, cfg.Timeout)
+					}
+				}
+			})
+		})
+	}
+}
+
 // lastCallBefore and firstCallAfter bracket a moment in the call log: what the
 // poller had polled by then and what it polled next.
 func lastCallBefore(t *testing.T, calls []routerCall, at time.Time) routerCall {
@@ -4407,4 +4480,166 @@ func snapshotSections(s *Snapshot) []snapshotSection {
 func operationFor(path string) (string, bool) {
 	src, ok := sourceFixture[path]
 	return src.operation, ok
+}
+
+// The cancellation is the poller's own, so nothing is warned about and no
+// backoff is armed.
+func TestShutdownDuringTheLoginIsNotAFailedLogin(t *testing.T) {
+	logged := captureLog(t, slog.LevelInfo)
+	rt := newFakeRouter(t)
+	rt.hangLogin()
+	cfg := testConfig()
+
+	synctest.Test(t, func(t *testing.T) {
+		p := NewPoller(rt, cfg)
+		ctx, cancel := context.WithCancel(t.Context())
+		done := make(chan error, 1)
+		go func() { done <- p.Run(ctx) }()
+
+		time.Sleep(cfg.Timeout / 2)
+		synctest.Wait()
+		if attempts, st := len(rt.loginTimes()), p.State(); attempts != 1 || !st.LastAttempt.IsZero() {
+			t.Fatalf("%v into the first cycle the poller is not sitting in its one login: %d attempts, "+
+				"LastErr=%v; the shutdown below has to land in the login, before Config.Timeout of %v ends "+
+				"the cycle on its own", cfg.Timeout/2, attempts, st.LastErr, cfg.Timeout)
+		}
+		cancel()
+
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Errorf("Run returned %v; a cancelled context is a clean shutdown and reports nil", err)
+			}
+		case <-time.After(time.Minute):
+			t.Fatal("Run did not return after its context was cancelled")
+		}
+
+		if recs := logged.records("login failed"); len(recs) != 0 {
+			t.Errorf("the shutdown was reported as a failed login:\n%s\nREADME reads that line as a held "+
+				"session, a wrong password or an unreachable router; a docker stop is none of them",
+				strings.Join(recs, "\n"))
+		}
+		warned := append(logged.records("level=WARN"), logged.records("level=ERROR")...)
+		if len(warned) != 0 {
+			t.Errorf("%d records at warn or above from a shutdown that landed mid-login; README promises "+
+				"that at info a healthy exporter is quiet, one starting line and nothing more, and a warning "+
+				"on every docker stop breaks exactly that. Log:\n%s", len(warned), logged)
+		}
+		if !p.loginAfter.IsZero() {
+			t.Errorf("the cancelled login armed the backoff, holding the next login back for %v; the "+
+				"exporter is stopping and there is no next cycle to hold, so the wait only says the shutdown "+
+				"was taken for a refused login", time.Until(p.loginAfter))
+		}
+	})
+}
+
+// A cancelled request fails like any other, so a shutdown mid-poll looks like
+// a cycle that ran out of time or lost its endpoints — however much it had
+// gathered, which is what the two cases vary.
+func TestShutdownDuringThePollIsNotAFailedCycle(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		block int // index into sources of the one that never answers
+	}{
+		{"nothing gathered", 0},
+		{"half the set gathered", len(sources) / 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			logged := captureLog(t, slog.LevelInfo)
+			rt := newFakeRouter(t)
+			stuck := sources[tc.block].Path
+			rt.block(stuck)
+			cfg := testConfig()
+
+			synctest.Test(t, func(t *testing.T) {
+				start := time.Now()
+				p := NewPoller(rt, cfg)
+				ctx, cancel := context.WithCancel(t.Context())
+				done := make(chan error, 1)
+				go func() { done <- p.Run(ctx) }()
+
+				time.Sleep(cfg.Timeout / 2)
+				synctest.Wait()
+				if calls, st := rt.callLog(), p.State(); st.Logins != 1 || len(calls) != tc.block+1 || !st.LastAttempt.IsZero() {
+					t.Fatalf("%v into the first cycle the poller is not sitting in its poll on %s, past its login "+
+						"and the %d sources before it: %d logins, %d calls, LastErr=%v; the shutdown below has to "+
+						"land there, before Config.Timeout of %v ends the cycle on its own",
+						cfg.Timeout/2, stuck, tc.block, st.Logins, len(calls), st.LastErr, cfg.Timeout)
+				}
+				cancel()
+
+				select {
+				case err := <-done:
+					if err != nil {
+						t.Errorf("Run returned %v; a cancelled context is a clean shutdown and reports nil", err)
+					}
+				case <-time.After(time.Minute):
+					t.Fatal("Run did not return after its context was cancelled")
+				}
+				if spent := time.Since(start); spent >= cfg.Timeout {
+					t.Fatalf("Run came back %v after the cycle began, not before Config.Timeout of %v; the cycle "+
+						"ran out of time on its own, and whatever it logged is about that rather than the shutdown",
+						spent, cfg.Timeout)
+				}
+
+				var blamed []string
+				for _, msg := range []string{"the cycle ran out of time", truncatedMsg, endpointDeadMsg} {
+					blamed = append(blamed, logged.records(msg)...)
+				}
+				if len(blamed) != 0 {
+					t.Errorf("%d records blaming the router for the shutdown:\n%s\nREADME reads those lines as a "+
+						"sick router, a session gone mid-cycle and endpoints that stopped answering; every request "+
+						"behind them was cancelled by the exporter itself, so each is not noise but a wrong "+
+						"diagnosis, sending an operator to a router that did nothing wrong",
+						len(blamed), strings.Join(blamed, "\n"))
+				}
+				warned := append(logged.records("level=WARN"), logged.records("level=ERROR")...)
+				if len(warned) != 0 {
+					t.Errorf("%d records at warn or above from a shutdown that landed in the poll; README promises "+
+						"that at info a healthy exporter is quiet, one starting line and nothing more, and a "+
+						"warning on every docker stop breaks exactly that. Log:\n%s", len(warned), logged)
+				}
+				if st := p.State(); !st.LastAttempt.IsZero() || st.Snapshot != nil || len(st.EndpointErrors) != 0 {
+					t.Errorf("the cancelled cycle was recorded: attempt=%v, Up=%v, snapshot=%v, errors charged to %d "+
+						"endpoints; it is the poller's first cycle, so nothing else could have written State. In "+
+						"push mode that record is the last point sent before the stop: tplink_up would read %v and "+
+						"tplink_scrape_errors_total would rise on %d endpoints whose only failure is that the "+
+						"exporter cancelled their requests",
+						!st.LastAttempt.IsZero(), st.Up, st.Snapshot != nil, len(st.EndpointErrors), b2f(st.Up),
+						len(st.EndpointErrors))
+				}
+				if !p.loginAfter.IsZero() {
+					t.Errorf("the cancelled cycle armed the backoff, holding the next login back for %v; the "+
+						"exporter is stopping and there is no next cycle to hold, so the wait only says the "+
+						"shutdown was taken for a cycle that ran out of time", time.Until(p.loginAfter))
+				}
+			})
+		})
+	}
+}
+
+func TestPublishedAtFollowsWhatRecordPublishes(t *testing.T) {
+	start := time.Date(2026, time.September, 7, 10, 0, 0, 0, time.UTC)
+	taken := start.Add(2 * time.Second)
+
+	for _, tc := range []struct {
+		name     string
+		snap     *Snapshot
+		gathered int
+		want     time.Time
+	}{
+		{"a snapshot that gathered something carries its own time", &Snapshot{TakenAt: taken}, 1, taken},
+		{"a snapshot that gathered nothing carries the cycle start", &Snapshot{TakenAt: taken}, 0, start},
+		{"no snapshot carries the cycle start", nil, 0, start},
+		{"a count without a snapshot carries the cycle start", nil, 3, start},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := publishedAt(tc.snap, tc.gathered, start); !got.Equal(tc.want) {
+				t.Errorf("publishedAt = %v, want %v with %d gathered; record publishes a snapshot only when it "+
+					"exists and gathered something, and the time handed to Config.OnCycle has to follow that same "+
+					"condition, or a push and a scrape would disagree about which snapshot is current",
+					got, tc.want, tc.gathered)
+			}
+		})
+	}
 }

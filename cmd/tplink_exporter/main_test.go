@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -668,7 +669,7 @@ func TestValidateReportsEveryFaultAtOnce(t *testing.T) {
 		PushTimeout:     0,
 	}
 	e := &env{}
-	validate(o, e)
+	validate(o, e, nil)
 
 	if len(e.errs) != 6 {
 		t.Fatalf("six faults produced %d: %v", len(e.errs), e.errs)
@@ -677,6 +678,37 @@ func TestValidateReportsEveryFaultAtOnce(t *testing.T) {
 	for _, want := range []string{"-host", "-session-renew", "-timeout", "-max-backoff", "-push-timeout", "-push-buffer"} {
 		if !strings.Contains(all, want) {
 			t.Errorf("the report %q does not name %s", all, want)
+		}
+	}
+}
+
+// A TPLINK_* value that does not parse is recorded in bindFlags, ahead of all
+// of this, and is not pinned here.
+func TestConfigureReportsTheEssentialsThenTheSettingsThenTheLabels(t *testing.T) {
+	// With TPLINK_PASSWORD set, readPassword reports "both are set" instead.
+	clearEnv(t)
+	fs, o, e := bind(t)
+	parse(t, fs,
+		"-log-level=shout",
+		"-password-file="+filepath.Join(t.TempDir(), "absent"),
+		"-min-backoff=2s", "-max-backoff=1s",
+		"-push-label=oops",
+	)
+
+	configure(o, e)
+
+	// The intervals keep their defaults and push mode is off, so nothing else
+	// joins the report.
+	want := []string{"-log-level", "router address", "password file", "-max-backoff", "-push-label"}
+	if len(e.errs) != len(want) {
+		t.Fatalf("five faults produced %d: %v", len(e.errs), e.errs)
+	}
+	for i, name := range want {
+		if !strings.Contains(e.errs[i].Error(), name) {
+			t.Fatalf("fault %d is %q, want the one naming %q; the report ran %v\n"+
+				"configure holds the report's order in one place because it moved once unnoticed: "+
+				"validate took the -host check's place in main and the password fault slid to the end",
+				i, e.errs[i], name, e.errs)
 		}
 	}
 }
@@ -704,7 +736,7 @@ func TestValidateRefusesAPushURLThatIsNotOne(t *testing.T) {
 			o.PushURL = c.url
 
 			e := &env{}
-			validate(o, e)
+			validate(o, e, nil)
 			if refused := len(e.errs) > 0; refused != c.refused {
 				t.Errorf("-push-url %q: refused = %v (%v), want %v", c.url, refused, e.errs, c.refused)
 			}
@@ -725,7 +757,7 @@ func TestValidateAppliesThePushRulesOnlyInPushMode(t *testing.T) {
 	o.Timeout = o.Interval // the sum rule would fire on this
 
 	e := &env{}
-	validate(o, e)
+	validate(o, e, nil)
 	if len(e.errs) != 0 {
 		t.Errorf("pull mode was refused with %v", e.errs)
 	}
@@ -749,7 +781,7 @@ func TestValidateRefusesACycleTooShortForBothTimeouts(t *testing.T) {
 			o.Interval, o.Timeout, o.PushTimeout = c.interval, c.timeout, c.pushOut
 
 			e := &env{}
-			validate(o, e)
+			validate(o, e, nil)
 			if refused := len(e.errs) > 0; refused != c.refused {
 				t.Errorf("-interval %s with -timeout %s and -push-timeout %s: refused = %v (%v), want %v",
 					c.interval, c.timeout, c.pushOut, refused, e.errs, c.refused)
@@ -770,7 +802,7 @@ func TestValidateAcceptsWhatTheDefaultsProduce(t *testing.T) {
 			fs, o, e := bind(t)
 			parse(t, fs, args...)
 
-			validate(o, e)
+			validate(o, e, nil)
 			if len(e.errs) != 0 {
 				t.Errorf("the shipped defaults do not start: %v", e.errs)
 			}
