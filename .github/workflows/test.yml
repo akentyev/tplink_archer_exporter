@@ -63,3 +63,25 @@ jobs:
       - name: actionlint
         if: ${{ !cancelled() }}
         run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 -color
+
+  # publish.yml's needs: test waits on every job in this file, so a red job
+  # here stops a release.
+  compose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # TEST-NET-1, because the base file's ${TPLINK_HOST:?…} refuses to render
+      # without a value; config reads no secret file. A reversed -f order also
+      # renders with rc 0, so a malformed file is all this catches.
+      - name: compose config
+        env:
+          TPLINK_HOST: 192.0.2.1
+        run: |
+          docker compose -f docker-compose.yml config -q
+          docker compose -f docker-compose.yml -f docker-compose.expose.yml config -q
+          docker compose -f docker-compose.yml -f docker-compose.expose.yml \
+              -f docker-compose.build.yml config -q
