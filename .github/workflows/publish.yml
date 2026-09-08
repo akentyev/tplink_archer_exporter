@@ -79,5 +79,35 @@ jobs:
             VERSION=${{ steps.meta.outputs.version }}
             REVISION=${{ github.sha }}
 
-      - if: env.PUBLISH == 'true'
-        run: docker buildx imagetools inspect ghcr.io/${{ github.repository }}:${{ steps.meta.outputs.version }}
+      - name: check the published tags
+        if: env.PUBLISH == 'true'
+        env:
+          IMAGE: ghcr.io/${{ github.repository }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+          # From the ref, not metadata-action: an output cannot check itself.
+          EXPECT_LATEST: ${{ github.event_name == 'push' && !contains(github.ref_name, '-') }}
+        run: |
+          digest() {
+            docker buildx imagetools inspect --format '{{.Manifest.Digest}}' "$1"
+          }
+          # A missing semver tag ends the step: GitHub's shell is bash -e.
+          published=$(digest "${IMAGE}:${VERSION}")
+          echo "${IMAGE}:${VERSION} is $published"
+
+          # Anchored, or a :latest-foo tag would count as latest.
+          if ! printf '%s\n' "$TAGS" | grep -q ':latest$'; then
+            if [ "$EXPECT_LATEST" = true ]; then
+              echo "a release tag, and no latest among the tags it published"
+              exit 1
+            fi
+            echo "no latest among the tags, so latest is not due to move"
+            exit 0
+          fi
+
+          moved=$(digest "${IMAGE}:latest")
+          if [ "$moved" != "$published" ]; then
+            echo "latest is $moved, not the index just published"
+            exit 1
+          fi
+          echo "latest carries the same index"
