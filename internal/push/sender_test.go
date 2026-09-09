@@ -950,8 +950,7 @@ func TestSenderFailureDeadlineDuringDrainKeepsTheCycle(t *testing.T) {
 		t.Errorf("Dropped() = %d, want %d: a deadline loses nothing", got, want)
 	}
 
-	rcv.delay(0)
-	rcv.respond(http.StatusOK)
+	rcv.respond(http.StatusOK) // and clears the 500ms pause with the plan
 	if err := s.Push(context.Background(), ts[3]); err != nil {
 		t.Fatalf("Push after the receiver came back: %v", err)
 	}
