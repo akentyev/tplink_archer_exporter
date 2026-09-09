@@ -5803,6 +5803,73 @@
         "percentChangeColorMode": "standard"
       },
       "pluginVersion": "11.6.0"
+    },
+    {
+      "id": 59,
+      "type": "stat",
+      "title": "Exporter build",
+      "description": "The exporter's own build, not the router's firmware: the version label of tplink_exporter_build_info. A build made outside a release tag reports dev; the commit is in the revision label.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 127
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "tplink_exporter_build_info{instance=~\"$instance\"}",
+          "refId": "A",
+          "range": false,
+          "instant": true,
+          "legendFormat": "{{version}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "text"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "name",
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "showPercentChange": false,
+        "wideLayout": true,
+        "percentChangeColorMode": "standard"
+      },
+      "pluginVersion": "11.6.0"
     }
   ],
   "preload": false,
