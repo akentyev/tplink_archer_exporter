@@ -118,7 +118,8 @@ func (r *fakeReceiver) respond(code int) {
 // answerThen answers first to the next n requests and then to every request
 // after them: how a test breaks a drain in the middle rather than at its
 // head, or refuses what is buffered while taking what is fresh. A zero then
-// is the off switch: first stands for every request, n and all.
+// is the off switch: first stands for every request, n and all. A delay is
+// left in place; respond is the call that clears the plan whole.
 func (r *fakeReceiver) answerThen(n, first, then int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -302,6 +303,24 @@ func TestFakeReceiverRespondClearsTheDelay(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed > 250*time.Millisecond {
 		t.Errorf("the request took %s, want none of the 500ms delay respond cleared", elapsed)
+	}
+}
+
+// The delay is set first on purpose: every other pair in the package sets it
+// after, where a clear inside answerThen would be a no-op.
+func TestFakeReceiverAnswerThenKeepsTheDelay(t *testing.T) {
+	r := newFakeReceiver(t)
+	req := &collectorpb.ExportMetricsServiceRequest{}
+
+	r.delay(200 * time.Millisecond)
+	r.answerThen(1, http.StatusServiceUnavailable, http.StatusOK)
+
+	start := time.Now()
+	if got, want := post(t, r.url(), req).StatusCode, http.StatusServiceUnavailable; got != want {
+		t.Errorf("status = %d, want %d: answerThen answers first to the next n", got, want)
+	}
+	if elapsed := time.Since(start); elapsed < 100*time.Millisecond {
+		t.Errorf("the request took %s, want the 200ms delay answerThen leaves standing", elapsed)
 	}
 }
 
