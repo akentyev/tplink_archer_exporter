@@ -1062,6 +1062,20 @@ func (c *logCapture) count(msg string) int {
 	return strings.Count(c.buf.String(), msg)
 }
 
+// records is the lines carrying msg, so a record can be read for the level and
+// the attributes it went in with.
+func (c *logCapture) records(msg string) []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var out []string
+	for _, line := range strings.Split(c.buf.String(), "\n") {
+		if strings.Contains(line, msg) {
+			out = append(out, line)
+		}
+	}
+	return out
+}
+
 func (c *logCapture) String() string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -1447,10 +1461,13 @@ func TestSenderShutdownDoesNotWaitOutADrainInFlight(t *testing.T) {
 	}
 	// A Shutdown that never held the token counts what it left after the close,
 	// not before; without that recount the loss goes unreported.
-	if got := logs.count("push buffer lost at shutdown"); got != 1 {
-		t.Errorf("loss lines = %d, want 1 for the batches the drain still held:\n%s", got, logs)
+	const lostMsg = "push buffer lost at shutdown"
+	recs := logs.records(lostMsg)
+	if len(recs) != 1 {
+		t.Fatalf("loss lines = %d, want 1 for the batches the drain still held:\n%s", len(recs), logs)
 	}
-	if strings.Contains(logs.String(), "err=<nil>") {
-		t.Errorf("a line carries err=<nil>; only a stopped drain leaves batches, and the loss line has to name it:\n%s", logs)
+	// Only a stopped drain leaves batches, so the line has to name the error.
+	if !strings.Contains(recs[0], "err=") || strings.Contains(recs[0], "err=<nil>") {
+		t.Errorf("the loss line does not name the error that stopped the drain:\n%s", recs[0])
 	}
 }
