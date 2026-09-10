@@ -7,6 +7,21 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
+// Delivery metric names, spelled once. newPushMetrics registers exactly these.
+const (
+	metricTotal       = "tplink_push_total"
+	metricDropped     = "tplink_push_dropped_total"
+	metricBuffered    = "tplink_push_buffered"
+	metricLastSuccess = "tplink_push_last_success_timestamp_seconds"
+)
+
+// MetricNames returns every metric name newPushMetrics registers. They go into
+// the same snapshot registry the collector's own metrics do, so anything
+// reading the collector alone does not see them.
+func MetricNames() []string {
+	return []string{metricTotal, metricDropped, metricBuffered, metricLastSuccess}
+}
+
 // pushMetrics are the sender's delivery counters, registered into the snapshot
 // registry rather than the process one so they ride the buffer through an
 // outage and explain it afterwards.
@@ -24,19 +39,19 @@ type pushMetrics struct {
 func newPushMetrics(reg prometheus.Registerer) (*pushMetrics, error) {
 	m := &pushMetrics{
 		total: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "tplink_push_total",
+			Name: metricTotal,
 			Help: "Attempts to send one snapshot batch to the OTLP receiver, by result. A cycle counts one per batch it tries -- the buffered ones it drains and its own -- so anything from none to the whole buffer.",
 		}, []string{"result"}),
 		dropped: prometheus.NewCounter(prometheus.CounterOpts{
-			Name: "tplink_push_dropped_total",
+			Name: metricDropped,
 			Help: "Batches dropped unsent: evicted from the buffer or refused by the receiver.",
 		}),
 		buffered: prometheus.NewGauge(prometheus.GaugeOpts{
-			Name: "tplink_push_buffered",
+			Name: metricBuffered,
 			Help: "Batches currently waiting in the buffer.",
 		}),
 		lastSuccess: prometheus.NewGauge(prometheus.GaugeOpts{
-			Name: "tplink_push_last_success_timestamp_seconds",
+			Name: metricLastSuccess,
 			Help: "Unix time of the last batch an OTLP receiver accepted.",
 		}),
 	}
