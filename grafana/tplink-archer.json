@@ -5872,6 +5872,104 @@
       "pluginVersion": "11.6.0"
     },
     {
+      "id": 65,
+      "type": "state-timeline",
+      "title": "Exporter silence",
+      "description": "A gap here is the exporter's own silence, not the router's: tplink_up is published whether or not the router answered, while Snapshot age climbs for either. Red is five minutes with no sample, so a silence shorter than that never shows, and the band starts five minutes in — it is the outage less five minutes. It answers for the selector as a whole: one exporter silent among live ones does not show, and an $instance that matches nothing reads red end to end.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 12,
+        "x": 6,
+        "y": 127
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "absent_over_time(tplink_up{instance=~\"$instance\"}[5m]) or (0 * count(count_over_time(tplink_up{instance=~\"$instance\"}[5m])))",
+          "refId": "A",
+          "range": true,
+          "instant": false,
+          "legendFormat": "exporter"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "delivering",
+                  "color": "green",
+                  "index": 0
+                },
+                "1": {
+                  "text": "silent",
+                  "color": "red",
+                  "index": 1
+                }
+              }
+            }
+          ],
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          },
+          "unit": "none",
+          "custom": {
+            "lineWidth": 0,
+            "fillOpacity": 80,
+            "spanNulls": false,
+            "insertNulls": false,
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "mergeValues": true,
+        "showValue": "auto",
+        "alignValue": "center",
+        "rowHeight": 0.9,
+        "perPage": 20,
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none",
+          "hideZeros": false
+        }
+      },
+      "pluginVersion": "11.6.0"
+    },
+    {
       "id": 60,
       "type": "row",
       "title": "Push delivery",
