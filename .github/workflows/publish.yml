@@ -58,6 +58,10 @@ jobs:
       # nothing.
       - id: meta
         uses: docker/metadata-action@v6
+        # Labels reach the child images only; ghcr reads a multi-arch
+        # package's description off the index annotations.
+        env:
+          DOCKER_METADATA_ANNOTATIONS_LEVELS: index
         with:
           images: ghcr.io/${{ github.repository }}
           tags: |
@@ -77,6 +81,7 @@ jobs:
           push: ${{ env.PUBLISH == 'true' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
           build-args: |
             VERSION=${{ steps.meta.outputs.version }}
             REVISION=${{ github.sha }}
@@ -113,6 +118,23 @@ jobs:
             exit 1
           fi
           echo "latest carries the same index"
+
+      # Its own step, or the early return above would skip it on a prerelease.
+      - name: check the published index describes itself
+        if: env.PUBLISH == 'true'
+        env:
+          IMAGE: ghcr.io/${{ github.repository }}
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          # The annotation level is an environment variable: a wrong name
+          # there publishes without one and says nothing.
+          described=$(docker buildx imagetools inspect --raw "${IMAGE}:${VERSION}" |
+            jq -r '.annotations["org.opencontainers.image.description"] // ""')
+          if [ -z "$described" ]; then
+            echo "the index carries no org.opencontainers.image.description"
+            exit 1
+          fi
+          echo "index description: ${described}"
 
       - name: run the published image
         if: env.PUBLISH == 'true'
