@@ -121,6 +121,11 @@ func (r *fakeRouter) Login(ctx context.Context) error {
 		<-ctx.Done()
 		return ctx.Err()
 	}
+	// Read after the sleep: a cancel that lands during the round trips fails
+	// the login, as tpapi's requests fail on their context.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if loginErr != nil {
 		return loginErr
 	}
@@ -172,6 +177,10 @@ func (r *fakeRouter) Logout(ctx context.Context) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.logouts = append(r.logouts, time.Now())
+	// A cancelled request never frees the session; the attempt is logged all the same.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	r.session = false
 	return nil
 }
@@ -343,8 +352,8 @@ func (r *fakeRouter) logoutCount() int {
 	return len(r.logoutTimes())
 }
 
-// logoutTimes is when the session was dropped: once per renewal, once on
-// shutdown.
+// logoutTimes is when a logout was attempted: once per renewal, once on
+// shutdown. A cancelled one is in the list and left the session where it was.
 func (r *fakeRouter) logoutTimes() []time.Time {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -373,9 +382,9 @@ func testConfig() Config {
 // startPoller runs the poller in the bubble and returns a stop that cancels it
 // and waits for Run to return. stop may be called twice, so a test can shut the
 // poller down mid-body and still defer it.
-func startPoller(t *testing.T, rt *fakeRouter, cfg Config) (*Poller, func()) {
+func startPoller(t *testing.T, client Router, cfg Config) (*Poller, func()) {
 	t.Helper()
-	p := NewPoller(rt, cfg)
+	p := NewPoller(client, cfg)
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan error, 1)
 	go func() { done <- p.Run(ctx) }()
@@ -4616,6 +4625,324 @@ func TestShutdownDuringThePollIsNotAFailedCycle(t *testing.T) {
 			})
 		})
 	}
+}
+
+// What a renewal writes: one line per request that failed, on a shared prefix,
+// and the line for the success.
+const (
+	renewalFailedMsg       = "renewing the session:"
+	renewalLogoutFailedMsg = renewalFailedMsg + " logout failed"
+	renewalLoginFailedMsg  = renewalFailedMsg + " login failed"
+	renewedMsg             = "session renewed"
+)
+
+// polledMsg is the debug line a good cycle writes once its snapshot is
+// recorded and before it renews the session: the last thing before renew is
+// called, and the only line every good cycle writes between the two.
+const polledMsg = "polled"
+
+// cancelOnRecord is a log handler that cancels the poller's context as a record
+// with msg goes through: a shutdown landing at one exact line of the cycle.
+// Enabled says yes to every level so the record reaches Handle; the inner
+// handler's level still decides what is written.
+type cancelOnRecord struct {
+	slog.Handler
+	msg    string
+	cancel context.CancelFunc
+}
+
+func (h cancelOnRecord) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h cancelOnRecord) Handle(ctx context.Context, r slog.Record) error {
+	if r.Message == h.msg {
+		h.cancel()
+	}
+	if !h.Handler.Enabled(ctx, r.Level) {
+		return nil
+	}
+	return h.Handler.Handle(ctx, r)
+}
+
+// logoutCancels is a router whose logout carries the shutdown: the poller's
+// context is cancelled as the request goes out, so the request fails on it, and
+// so would a login sent after it.
+type logoutCancels struct {
+	*fakeRouter
+	cancel context.CancelFunc
+}
+
+func (r logoutCancels) Logout(ctx context.Context) error {
+	r.cancel()
+	return r.fakeRouter.Logout(ctx)
+}
+
+// logoutHangs is a router that takes the poller's first logout and never
+// finishes it, so only the caller's context ends the request. That logout is
+// the renewal's, on the cycle's context, whose Timeout runs out with the parent
+// alive; the logout on the way out, the second, goes through.
+type logoutHangs struct{ *fakeRouter }
+
+func (r logoutHangs) Logout(ctx context.Context) error {
+	if r.logoutCount() == 0 {
+		<-ctx.Done()
+	}
+	return r.fakeRouter.Logout(ctx)
+}
+
+// renewingConfig renews in every cycle: SessionRenew is shorter than the poll,
+// so the first cycle already replaces the session it logged in with.
+func renewingConfig() Config {
+	cfg := testConfig()
+	cfg.SessionRenew = replyLatency
+	return cfg
+}
+
+// awaitRenewalLogin advances the clock until the renewal's login is in flight:
+// the router has seen the logout and a second login, and State still counts
+// one, so that second login has not returned. The poller is durably blocked in
+// it when this returns.
+func awaitRenewalLogin(t *testing.T, rt *fakeRouter, p *Poller, cfg Config) {
+	t.Helper()
+	deadline := time.Now().Add(cfg.Timeout)
+	for {
+		synctest.Wait()
+		if len(rt.loginTimes()) == 2 {
+			break
+		}
+		if !time.Now().Before(deadline) {
+			st := p.State()
+			t.Fatalf("no second login went out within Config.Timeout (%v) of Run starting: %d logins, %d logouts, "+
+				"snapshot=%v, LastErr=%v; with SessionRenew at %v the first cycle renews the session it logged in "+
+				"with, and a cycle cannot outlast its Timeout", cfg.Timeout, len(rt.loginTimes()), rt.logoutCount(),
+				st.Snapshot != nil, st.LastErr, cfg.SessionRenew)
+		}
+		time.Sleep(replyLatency)
+	}
+	if n, st := rt.logoutCount(), p.State(); n != 1 || st.Logins != 1 || st.Snapshot == nil {
+		t.Fatalf("the poller is not sitting in the renewal's login: %d logouts, %d logins returned, snapshot=%v; "+
+			"a renewal logs out and back in once the cycle's snapshot is recorded, and the shutdown has to land "+
+			"inside that login", n, st.Logins, st.Snapshot != nil)
+	}
+}
+
+// A renewal is the poller's own scheduled chore: a logout and a login on a
+// session the cycle has already used and recorded. A shutdown that lands inside
+// it cancels the request in flight, and that request failing is the plan, not
+// an event. The two cases vary which request the shutdown lands in; cut at the
+// logout, the renewal is given up rather than logged back in on a dead context.
+func TestShutdownDuringTheRenewalIsNotAFailedRenewal(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// The logout carries the shutdown: the context dies as the request goes
+		// out, so it fails on it, and the login after it is not made. Otherwise
+		// the test cancels once the login is in flight, and only the login fails.
+		inTheLogout bool
+	}{
+		{"in the logout", true},
+		{"in the login", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			logged := captureLog(t, slog.LevelInfo)
+			rt := newFakeRouter(t)
+			cfg := renewingConfig()
+
+			synctest.Test(t, func(t *testing.T) {
+				ctx, cancel := context.WithCancel(t.Context())
+				defer cancel()
+				var client Router = rt
+				if tc.inTheLogout {
+					client = logoutCancels{fakeRouter: rt, cancel: cancel}
+				}
+				p := NewPoller(client, cfg)
+				done := make(chan error, 1)
+				go func() { done <- p.Run(ctx) }()
+
+				// With the router carrying the shutdown nothing here cancels before
+				// Run returns: Run returning at all is the renewal's logout having
+				// gone out, and a renewal that never starts is a Run that never returns.
+				if !tc.inTheLogout {
+					awaitRenewalLogin(t, rt, p, cfg)
+					if ctx.Err() != nil {
+						t.Fatal("the context is cancelled with the renewal's login in flight; only the test cancels " +
+							"it in this case, and it has not yet, so the shutdown landed somewhere before the login")
+					}
+					cancel()
+				}
+
+				select {
+				case err := <-done:
+					if err != nil {
+						t.Errorf("Run returned %v; a cancelled context is a clean shutdown and reports nil", err)
+					}
+				case <-time.After(time.Minute):
+					st := p.State()
+					t.Fatalf("Run did not return within a minute; context cancelled=%v, %d logins, %d logouts, "+
+						"snapshot=%v, LastErr=%v — in the logout case a context still alive is a renewal that "+
+						"never made its logout", ctx.Err() != nil, len(rt.loginTimes()),
+						rt.logoutCount(), st.Snapshot != nil, st.LastErr)
+				}
+
+				if tc.inTheLogout {
+					// Run has returned, so the poller's own fields are at rest.
+					st, held := p.State(), time.Since(p.loggedInAt)
+					if st.Snapshot == nil || st.Logins != 1 || held < cfg.SessionRenew || rt.logoutCount() != 2 {
+						t.Fatalf("the shutdown did not land in the renewal's logout: snapshot=%v, Logins=%d, session "+
+							"held %v against SessionRenew of %v, %d logouts, LastErr=%v; a renewal logs out once the "+
+							"cycle's snapshot is recorded, that logout carries the shutdown here, and Run's own "+
+							"logout on the way out is the second", st.Snapshot != nil, st.Logins, held,
+							cfg.SessionRenew, rt.logoutCount(), st.LastErr)
+					}
+					if logins := len(rt.loginTimes()); logins != 1 || st.LoginFailures != 0 {
+						t.Errorf("the router saw %d login attempts and LoginFailures = %d, want 1 and 0: after "+
+							"the logout the shutdown cancelled the renewal is given up rather than logged back "+
+							"in. A login made there would go out on a dead context, never reach the device, and "+
+							"count in tplink_login_failed_total as a refusal, while the session it would replace "+
+							"is freed by Run's own logout on the way out", logins, st.LoginFailures)
+					}
+				}
+
+				if recs := logged.records(renewalFailedMsg); len(recs) != 0 {
+					t.Errorf("the shutdown was reported as a failed renewal:\n%s\nA renewal is the poller's own "+
+						"scheduled chore, and giving it up because the exporter is stopping is the plan: every "+
+						"request behind those lines was cancelled by the exporter itself, so each sends an operator "+
+						"to a router that did nothing wrong", strings.Join(recs, "\n"))
+				}
+				warned := append(logged.records("level=WARN"), logged.records("level=ERROR")...)
+				if len(warned) != 0 {
+					t.Errorf("%d records at warn or above from a shutdown that landed in the renewal; README "+
+						"promises that at info a healthy exporter is quiet, one starting line and nothing more, and "+
+						"a warning on every docker stop breaks exactly that. Log:\n%s", len(warned), logged)
+				}
+			})
+		})
+	}
+}
+
+// The shutdown lands after the cycle has recorded its snapshot and before the
+// renewal it was due for. A renewal that starts then has nothing to renew for:
+// it makes no request and says nothing.
+func TestShutdownBeforeTheRenewalSkipsIt(t *testing.T) {
+	logged := captureLog(t, slog.LevelInfo)
+	rt := newFakeRouter(t)
+	cfg := renewingConfig()
+
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		// Nothing blocks between the cycle recording its snapshot and renewing
+		// the session, so no request can carry the cancel there; the debug line
+		// written between the two can.
+		slog.SetDefault(slog.New(cancelOnRecord{Handler: slog.Default().Handler(), msg: polledMsg, cancel: cancel}))
+		p := NewPoller(rt, cfg)
+		done := make(chan error, 1)
+		go func() { done <- p.Run(ctx) }()
+
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Errorf("Run returned %v; a cancelled context is a clean shutdown and reports nil", err)
+			}
+		case <-time.After(time.Minute):
+			t.Fatalf("Run did not return within a minute; the cancel rides on the %q line, which every good cycle "+
+				"writes, so either the line is gone or no cycle succeeded: %d logins, LastErr=%v",
+				polledMsg, len(rt.loginTimes()), p.State().LastErr)
+		}
+		// Run has returned, so the poller's own fields are at rest.
+		st, held := p.State(), time.Since(p.loggedInAt)
+		if st.Snapshot == nil || st.Logins != 1 || logged.count(renewedMsg) != 0 || held < cfg.SessionRenew {
+			t.Fatalf("the shutdown did not land between the cycle's record and a renewal that was due: "+
+				"snapshot=%v, Logins=%d, %q logged %d times, session held %v against SessionRenew of %v",
+				st.Snapshot != nil, st.Logins, renewedMsg, logged.count(renewedMsg), held, cfg.SessionRenew)
+		}
+
+		if logins, logouts := len(rt.loginTimes()), rt.logoutCount(); logins != 1 || logouts != 1 {
+			t.Errorf("the router saw %d login attempts and %d logouts, want 1 and 1, the one at startup and the "+
+				"one on shutdown; a renewal that comes due after the shutdown has landed makes neither request. "+
+				"Made, both would go out on a cancelled context and never reach the device, and the login would "+
+				"count in tplink_login_failed_total, with the exporter stopping anyway", logins, logouts)
+		}
+		if recs := logged.records(renewalFailedMsg); len(recs) != 0 {
+			t.Errorf("the shutdown was reported as a failed renewal:\n%s\nA renewal is the poller's own scheduled "+
+				"chore, and one that comes due after the shutdown has landed is not made, let alone reported: "+
+				"every request behind those lines was cancelled by the exporter itself, so each sends an operator "+
+				"to a router that did nothing wrong", strings.Join(recs, "\n"))
+		}
+		warned := append(logged.records("level=WARN"), logged.records("level=ERROR")...)
+		if len(warned) != 0 {
+			t.Errorf("%d records at warn or above from a shutdown that landed just before the renewal; README "+
+				"promises that at info a healthy exporter is quiet, one starting line and nothing more, and a "+
+				"warning on every docker stop breaks exactly that. Log:\n%s", len(warned), logged)
+		}
+	})
+}
+
+// Below the deadline a spent Timeout and a cancelled parent are the same
+// ctx.Err() and mean opposite things: a renewal that runs out of the cycle's
+// Timeout is a router too slow to log out and back in, not a shutdown, and
+// each request that failed is reported. A shutdown cancels both contexts, so
+// only this case tells a guard on the parent from one on ctx, at either line.
+func TestRenewalThatRanOutOfTimeIsStillReported(t *testing.T) {
+	logged := captureLog(t, slog.LevelInfo)
+	rt := newFakeRouter(t)
+	cfg := renewingConfig()
+	// The hook is the poller's own word that the cycle is over, renewal
+	// included: nothing in State is written after the renewal, and what the
+	// renewal writes is the assertion.
+	var hook cycleHook
+	cfg.OnCycle = hook.fn()
+
+	synctest.Test(t, func(t *testing.T) {
+		start := time.Now()
+		p, stop := startPoller(t, logoutHangs{rt}, cfg)
+		defer stop()
+
+		budget := 2 * cfg.Timeout
+		deadline := time.Now().Add(budget)
+		for {
+			synctest.Wait()
+			if hook.count() != 0 {
+				break
+			}
+			if !time.Now().Before(deadline) {
+				st := p.State()
+				t.Fatalf("no cycle ended within %v of Run starting: %d logins, %d logouts, snapshot=%v, "+
+					"LastErr=%v; with SessionRenew at %v the first cycle renews the session it logged in with, "+
+					"and the renewal's logout hangs until Config.Timeout of %v ends it", budget,
+					len(rt.loginTimes()), rt.logoutCount(), st.Snapshot != nil, st.LastErr, cfg.SessionRenew,
+					cfg.Timeout)
+			}
+			time.Sleep(cfg.Timeout / 20)
+		}
+		// The renewal is over and nothing has cancelled the poller: the cycle
+		// ended on its Timeout, with the parent alive.
+		st, logins, logouts := p.State(), len(rt.loginTimes()), rt.logoutCount()
+		if ended := hook.records()[0].At.Sub(start); ended < cfg.Timeout || logouts != 1 || st.Logins != 1 ||
+			st.Snapshot == nil {
+			t.Fatalf("the cycle did not end inside a renewal whose logout ran out of time: it ended %v after Run "+
+				"started against Config.Timeout of %v, %d logouts, %d logins returned, snapshot=%v, LastErr=%v; "+
+				"a renewal logs out once the cycle's snapshot is recorded, and that logout hangs until the "+
+				"deadline", ended, cfg.Timeout, logouts, st.Logins, st.Snapshot != nil, st.LastErr)
+		}
+		stop()
+
+		warned, errored := logged.records("level=WARN"), logged.records("level=ERROR")
+		onDeadline := 0
+		for _, rec := range warned {
+			if strings.Contains(rec, context.DeadlineExceeded.Error()) {
+				onDeadline++
+			}
+		}
+		if len(warned) != 2 || onDeadline != 2 || len(errored) != 0 ||
+			logged.count(renewalLogoutFailedMsg) != 1 || logged.count(renewalLoginFailedMsg) != 1 {
+			t.Errorf("want two warnings and no error, the renewal's logout and then its login each failing on the "+
+				"cycle's deadline; got %d warnings, %d of them on the deadline, and %d errors, with %d logins and "+
+				"%d logouts at the router by the end of the cycle. The parent context is alive, so this is a "+
+				"router too slow to log out and back in, not a shutdown; below the deadline the two are the same "+
+				"ctx.Err(), and a renewal that stops after its logout without a word, or reports the logout and "+
+				"not the login, took the deadline for a shutdown and hides a sick router behind the quiet a "+
+				"docker stop is owed. Log:\n%s",
+				len(warned), onDeadline, len(errored), logins, logouts, logged)
+		}
+	})
 }
 
 func TestPublishedAtFollowsWhatRecordPublishes(t *testing.T) {
