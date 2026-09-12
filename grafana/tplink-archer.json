@@ -5803,6 +5803,548 @@
         "percentChangeColorMode": "standard"
       },
       "pluginVersion": "11.6.0"
+    },
+    {
+      "id": 59,
+      "type": "stat",
+      "title": "Exporter build",
+      "description": "The exporter's own build, not the router's firmware: the version label of tplink_exporter_build_info. A build made outside a release tag reports dev; the commit is in the revision label.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 127
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "tplink_exporter_build_info{instance=~\"$instance\"}",
+          "refId": "A",
+          "range": false,
+          "instant": true,
+          "legendFormat": "{{version}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "text"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "name",
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "showPercentChange": false,
+        "wideLayout": true,
+        "percentChangeColorMode": "standard"
+      },
+      "pluginVersion": "11.6.0"
+    },
+    {
+      "id": 65,
+      "type": "state-timeline",
+      "title": "Exporter silence",
+      "description": "A gap here is the exporter's own silence, not the router's: tplink_up is published whether or not the router answered, while Snapshot age climbs for either. Red is five minutes with no sample, so a silence shorter than that never shows, and the band starts five minutes in — it is the outage less five minutes. It answers for the selector as a whole: one exporter silent among live ones does not show, and an $instance that matches nothing reads red end to end.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 12,
+        "x": 6,
+        "y": 127
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "absent_over_time(tplink_up{instance=~\"$instance\"}[5m]) or (0 * count(count_over_time(tplink_up{instance=~\"$instance\"}[5m])))",
+          "refId": "A",
+          "range": true,
+          "instant": false,
+          "legendFormat": "exporter"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "delivering",
+                  "color": "green",
+                  "index": 0
+                },
+                "1": {
+                  "text": "silent",
+                  "color": "red",
+                  "index": 1
+                }
+              }
+            }
+          ],
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          },
+          "unit": "none",
+          "custom": {
+            "lineWidth": 0,
+            "fillOpacity": 80,
+            "spanNulls": false,
+            "insertNulls": false,
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "mergeValues": true,
+        "showValue": "auto",
+        "alignValue": "center",
+        "rowHeight": 0.9,
+        "perPage": 20,
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none",
+          "hideZeros": false
+        }
+      },
+      "pluginVersion": "11.6.0"
+    },
+    {
+      "id": 60,
+      "type": "row",
+      "title": "Push delivery",
+      "collapsed": true,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 132
+      },
+      "panels": [
+        {
+          "id": 61,
+          "type": "timeseries",
+          "title": "Buffer depth",
+          "description": "Snapshot batches waiting in the sender's ring while sends fail. The whole row is push mode only: without -push-url nothing publishes these metrics and every panel here reads No data, which is not the same as zero.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 6,
+            "w": 7,
+            "x": 0,
+            "y": 133
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "tplink_push_buffered{instance=~\"$instance\"}",
+              "refId": "A",
+              "range": true,
+              "instant": false,
+              "legendFormat": "buffered"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "fillOpacity": 20,
+                "gradientMode": "opacity",
+                "spanNulls": false,
+                "showPoints": "auto",
+                "pointSize": 5,
+                "barAlignment": 0,
+                "axisPlacement": "auto",
+                "axisLabel": "",
+                "axisColorMode": "text",
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "hideFrom": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": false
+                },
+                "insertNulls": false,
+                "thresholdsStyle": {
+                  "mode": "off"
+                },
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                }
+              },
+              "color": {
+                "mode": "palette-classic"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "text",
+                    "value": null
+                  }
+                ]
+              },
+              "mappings": [],
+              "unit": "none",
+              "min": 0,
+              "decimals": 0
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true,
+              "calcs": []
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc",
+              "hideZeros": false
+            }
+          },
+          "pluginVersion": "11.6.0"
+        },
+        {
+          "id": 62,
+          "type": "timeseries",
+          "title": "Send attempts",
+          "description": "tplink_push_total counts attempts, not cycles: a cycle sends what it drains from the buffer and then its own batch, so a recovery is one spike of ok, spread over the five minutes the rate covers. While a receiver is down the drain stops at the first batch it cannot send: one failed attempt per cycle, whatever the buffer holds.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 6,
+            "w": 7,
+            "x": 7,
+            "y": 133
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "sum by (result) (rate(tplink_push_total{instance=~\"$instance\"}[5m])) * 60",
+              "refId": "A",
+              "range": true,
+              "instant": false,
+              "legendFormat": "{{result}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "fillOpacity": 0,
+                "gradientMode": "opacity",
+                "spanNulls": false,
+                "showPoints": "never",
+                "pointSize": 5,
+                "barAlignment": 0,
+                "axisPlacement": "auto",
+                "axisLabel": "",
+                "axisColorMode": "text",
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "hideFrom": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": false
+                },
+                "insertNulls": false,
+                "thresholdsStyle": {
+                  "mode": "off"
+                },
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                }
+              },
+              "color": {
+                "mode": "palette-classic"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "text",
+                    "value": null
+                  }
+                ]
+              },
+              "mappings": [],
+              "unit": "cpm",
+              "min": 0
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "failed"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "red"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "ok"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "green"
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true,
+              "calcs": []
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc",
+              "hideZeros": false
+            }
+          },
+          "pluginVersion": "11.6.0"
+        },
+        {
+          "id": 63,
+          "type": "stat",
+          "title": "Batches dropped",
+          "description": "Batches lost for good over the window shown: evicted from a full buffer, or refused by the receiver. Each one is a hole in every other panel — the snapshot it carried never arrived anywhere. Push mode only: in pull mode this reads No data, not zero.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 6,
+            "w": 5,
+            "x": 14,
+            "y": 133
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "increase(tplink_push_dropped_total{instance=~\"$instance\"}[$__range])",
+              "refId": "A",
+              "range": false,
+              "instant": true,
+              "legendFormat": "dropped"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "none",
+              "decimals": 0,
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "red",
+                    "value": 1
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "orientation": "auto",
+            "textMode": "auto",
+            "colorMode": "background",
+            "graphMode": "none",
+            "justifyMode": "auto",
+            "showPercentChange": false,
+            "wideLayout": true,
+            "percentChangeColorMode": "standard"
+          },
+          "pluginVersion": "11.6.0"
+        },
+        {
+          "id": 64,
+          "type": "stat",
+          "title": "Since a batch was accepted",
+          "description": "Time since a receiver last accepted a batch, as of the newest data that reached the datasource. One or two intervals is the healthy reading: the snapshot is collected before the send, so each batch carries the previous cycle's success. While sends fail nothing arrives and the number stops rather than climbs — the outage shows in Buffer depth and Send attempts, not here.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 6,
+            "w": 5,
+            "x": 19,
+            "y": 133
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "time() - tplink_push_last_success_timestamp_seconds{instance=~\"$instance\"}",
+              "refId": "A",
+              "range": true,
+              "instant": false,
+              "legendFormat": "since"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "decimals": 0,
+              "color": {
+                "mode": "fixed",
+                "fixedColor": "text"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "text",
+                    "value": null
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "orientation": "auto",
+            "textMode": "auto",
+            "colorMode": "none",
+            "graphMode": "none",
+            "justifyMode": "auto",
+            "showPercentChange": false,
+            "wideLayout": true,
+            "percentChangeColorMode": "standard"
+          },
+          "pluginVersion": "11.6.0"
+        }
+      ]
     }
   ],
   "preload": false,

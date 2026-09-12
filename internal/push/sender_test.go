@@ -486,7 +486,7 @@ func TestSenderNewResolvesZeroBufferBeforeRingSeesIt(t *testing.T) {
 	}
 }
 
-// The four delivery metric names travel in the pushed batch.
+// Every delivery metric travels in the pushed batch.
 func TestSenderPushSendsDeliveryMetrics(t *testing.T) {
 	rcv := newFakeReceiver(t)
 	snapshot := prometheus.NewRegistry()
@@ -505,12 +505,7 @@ func TestSenderPushSendsDeliveryMetrics(t *testing.T) {
 	}
 
 	reqs := rcv.requests()
-	for _, name := range []string{
-		"tplink_push_total",
-		"tplink_push_dropped_total",
-		"tplink_push_buffered",
-		"tplink_push_last_success_timestamp_seconds",
-	} {
+	for _, name := range MetricNames() {
 		if len(datapointsOf(reqs, name)) == 0 {
 			t.Errorf("%s did not travel in the pushed batch", name)
 		}

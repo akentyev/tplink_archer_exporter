@@ -335,9 +335,10 @@ did not exist yet when those cycles ran; `tplink_push_dropped_total` stayed at z
 
 ## Dashboard
 
-`grafana/tplink-archer.json` draws the whole snapshot in nine rows — overview, a watchlist of the conditions worth an
-alert, WAN, router, clients, DHCP, VPN, exposure, and the exporter's own health beside them so that "no clients" and
-"the router did not answer" cannot be confused.
+`grafana/tplink-archer.json` draws the whole snapshot in rows — overview, a watchlist of the conditions worth an
+alert, WAN, router, clients, DHCP, VPN, exposure, the exporter's own health beside them so that "no clients" and
+"the router did not answer" cannot be confused, and push delivery, collapsed because it holds nothing unless
+`-push-url` is set.
 
 It needs a Prometheus-compatible datasource holding these metrics; VictoriaMetrics serves them through Grafana's
 Prometheus datasource type. Dashboards → New → Import → Upload JSON file, then answer the one input, `DS_PROMETHEUS`.

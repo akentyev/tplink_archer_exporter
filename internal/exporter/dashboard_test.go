@@ -8,16 +8,20 @@ import (
 	"io"
 	"maps"
 	"os"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/akentyev/tplink_archer_exporter/internal/push"
 )
 
 // grafana/tplink-archer.json is shipped for other people to import. What breaks
 // an import elsewhere is not malformed JSON but a datasource uid from the
 // Grafana the file was exported from: it resolves nowhere else and every query
-// under it comes back empty. These tests read the structure and the datasource
-// references; nothing here parses PromQL.
+// under it comes back empty. These tests read the structure, the datasource
+// references and the metric names; no PromQL is parsed — a metric name is
+// matched as text, wherever a string carries one.
 //
 // go test runs with the working directory set to the package source directory,
 // so the path is relative to internal/exporter, not to the module root.
@@ -161,15 +165,13 @@ func decodeJSON(t *testing.T, what string, raw []byte) map[string]any {
 	return obj
 }
 
-// Assertion 1: the file parses as JSON.
 func TestDashboardParsesAsJSON(t *testing.T) {
 	if doc := loadDashboard(t); len(doc) == 0 {
 		t.Fatalf("%s parses to an empty object; the file is JSON and nothing else", dashboardPath)
 	}
 }
 
-// Assertion 2: __inputs declares DS_PROMETHEUS as a Prometheus datasource. It is
-// what the import dialog asks the importer to pick.
+// The import dialog asks the importer to pick what __inputs declares.
 func TestDashboardDeclaresThePrometheusInput(t *testing.T) {
 	doc := loadDashboard(t)
 
@@ -210,8 +212,7 @@ func TestDashboardDeclaresThePrometheusInput(t *testing.T) {
 	}
 }
 
-// Assertion 3: the templating variable consumes the input. Without it the input
-// is declared and nobody reads it.
+// Without the variable the input is declared and nobody reads it.
 func TestDashboardVariableConsumesThePrometheusInput(t *testing.T) {
 	doc := loadDashboard(t)
 
@@ -263,7 +264,6 @@ func TestDashboardVariableConsumesThePrometheusInput(t *testing.T) {
 		names, datasourceVar, datasourceVar)
 }
 
-// Assertion 4: no reference anywhere in the tree is a raw uid.
 func TestDashboardPinsNoRawDatasourceUID(t *testing.T) {
 	refs := datasourceRefs(loadDashboard(t), "")
 	if len(refs) == 0 {
@@ -277,9 +277,8 @@ func TestDashboardPinsNoRawDatasourceUID(t *testing.T) {
 	}
 }
 
-// Assertion 5: the top-level id is null. "Export for sharing" nulls it; a
-// numeric id is a dashboard copied out of the browser, and it collides on
-// import.
+// "Export for sharing" nulls the top-level id; a numeric one is a dashboard
+// copied out of the browser, and it collides on import.
 func TestDashboardIDIsNull(t *testing.T) {
 	doc := loadDashboard(t)
 
@@ -395,4 +394,99 @@ func refLines(refs []datasourceRef) []string {
 		out = append(out, r.path+"="+r.uid)
 	}
 	return out
+}
+
+// metricName matches a metric name in a string. Every name this exporter
+// publishes is tplink_ followed by lowercase, digits and underscore.
+var metricName = regexp.MustCompile(`\btplink_[a-z0-9_]+\b`)
+
+// Metrics published and deliberately not drawn, and why. A reason is
+// required: an empty one does not count as an entry.
+var metricsWithoutAPanel = map[string]string{
+	"tplink_cpu_cores":         "the count is the number of tplink_cpu_core_usage_ratio series",
+	"tplink_router_clock_info": "a TP-Link timezone index is not an offset and names no location",
+}
+
+// publishedMetricNames is every tplink_ name a scrape can carry: what the
+// collector announces through Describe, and the delivery metrics
+// internal/push registers into the same snapshot registry.
+func publishedMetricNames(t *testing.T) map[string]bool {
+	t.Helper()
+	names := map[string]bool{}
+	for name := range describedMetrics(t) {
+		names[name] = true
+	}
+	for _, name := range push.MetricNames() {
+		names[name] = true
+	}
+	return names
+}
+
+// dashboardMetricNames maps every metric name the file mentions to the JSON
+// paths mentioning it. Only string values are read; the keys are Grafana's
+// schema, never a metric name.
+func dashboardMetricNames(doc any) map[string][]string {
+	names := map[string][]string{}
+	collectMetricNames(doc, "", names)
+	return names
+}
+
+// collectMetricNames walks the decoded file; sorted keys, as in datasourceRefs.
+func collectMetricNames(node any, path string, into map[string][]string) {
+	switch n := node.(type) {
+	case map[string]any:
+		for _, key := range slices.Sorted(maps.Keys(n)) {
+			collectMetricNames(n[key], childPath(path, key), into)
+		}
+	case []any:
+		for i, v := range n {
+			collectMetricNames(v, fmt.Sprintf("%s[%d]", path, i), into)
+		}
+	case string:
+		for _, name := range metricName.FindAllString(n, -1) {
+			into[name] = append(into[name], path)
+		}
+	}
+}
+
+func TestDashboardNamesOnlyPublishedMetrics(t *testing.T) {
+	found := dashboardMetricNames(loadDashboard(t))
+	if len(found) == 0 {
+		t.Fatalf("%s names no tplink_ metric at all: either the panels lost their queries or the walk stopped short, and this test proves nothing either way",
+			dashboardPath)
+	}
+
+	published := publishedMetricNames(t)
+	for _, name := range slices.Sorted(maps.Keys(found)) {
+		if published[name] {
+			continue
+		}
+		t.Errorf("%s asks for %s in %s, and the exporter publishes no such metric: the panel comes back empty and Grafana reports no error",
+			dashboardPath, name, strings.Join(found[name], ", "))
+	}
+}
+
+// A hole in the walk fails this test: the names it missed read as undrawn.
+func TestDashboardDrawsEveryPublishedMetric(t *testing.T) {
+	found := dashboardMetricNames(loadDashboard(t))
+	published := publishedMetricNames(t)
+
+	for _, name := range slices.Sorted(maps.Keys(published)) {
+		if len(found[name]) > 0 || metricsWithoutAPanel[name] != "" {
+			continue
+		}
+		t.Errorf("the exporter publishes %s and %s never names it: either nobody drew it, or a panel lost its query. Draw it, or put the name in metricsWithoutAPanel with the reason",
+			name, dashboardPath)
+	}
+
+	for _, name := range slices.Sorted(maps.Keys(metricsWithoutAPanel)) {
+		switch {
+		case len(found[name]) > 0:
+			t.Errorf("metricsWithoutAPanel says %s is drawn nowhere and %s draws it in %s: take the entry out",
+				name, dashboardPath, strings.Join(found[name], ", "))
+		case !published[name]:
+			t.Errorf("metricsWithoutAPanel keeps %s and the exporter publishes no such metric: it was renamed or dropped, and the entry outlived it",
+				name)
+		}
+	}
 }
