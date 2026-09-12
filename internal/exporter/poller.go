@@ -299,7 +299,7 @@ func (p *Poller) cycle(ctx context.Context) time.Time {
 		}
 		p.reportEndpoints(snap.Errors)
 		slog.Debug("polled", "took", time.Since(start), "failed_endpoints", len(snap.Errors))
-		p.renew(ctx)
+		p.renew(ctx, parent)
 		return publishedAt(snap, gathered, start)
 
 	case ctx.Err() != nil:
@@ -459,7 +459,13 @@ func (p *Poller) reportEndpoints(errs map[string]error) {
 // It runs after the snapshot is recorded, on a session that has just been used
 // successfully, so a renewal that fails costs no data: the poller is simply
 // logged out, and the next cycle logs in through the ordinary path.
-func (p *Poller) renew(ctx context.Context) {
+//
+// A spent cycle Timeout is ctx.Err() too, and that is a sick router worth a
+// warning; only parent tells a shutdown from it.
+func (p *Poller) renew(ctx, parent context.Context) {
+	if parent.Err() != nil {
+		return
+	}
 	if p.cfg.SessionRenew <= 0 || !p.loggedIn || time.Since(p.loggedInAt) < p.cfg.SessionRenew {
 		return
 	}
@@ -472,9 +478,15 @@ func (p *Poller) renew(ctx context.Context) {
 	}
 	held := time.Since(p.loggedInAt)
 	if err := p.logout(ctx); err != nil {
+		if parent.Err() != nil {
+			return
+		}
 		slog.Warn("renewing the session: logout failed", "err", err, "held", held)
 	}
 	if err := p.login(ctx); err != nil {
+		if parent.Err() != nil {
+			return
+		}
 		// Not a lost session and not a failed cycle: the snapshot is already
 		// recorded, and the next cycle logs in like any other.
 		slog.Warn("renewing the session: login failed", "err", err)
