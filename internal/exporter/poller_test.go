@@ -121,6 +121,11 @@ func (r *fakeRouter) Login(ctx context.Context) error {
 		<-ctx.Done()
 		return ctx.Err()
 	}
+	// Read after the sleep: a cancel that lands during the round trips fails
+	// the login, as tpapi's requests fail on their context.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if loginErr != nil {
 		return loginErr
 	}
@@ -172,6 +177,10 @@ func (r *fakeRouter) Logout(ctx context.Context) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.logouts = append(r.logouts, time.Now())
+	// A cancelled request never frees the session; the attempt is logged all the same.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	r.session = false
 	return nil
 }
@@ -343,8 +352,8 @@ func (r *fakeRouter) logoutCount() int {
 	return len(r.logoutTimes())
 }
 
-// logoutTimes is when the session was dropped: once per renewal, once on
-// shutdown.
+// logoutTimes is when a logout was attempted: once per renewal, once on
+// shutdown. A cancelled one is in the list and left the session where it was.
 func (r *fakeRouter) logoutTimes() []time.Time {
 	r.mu.Lock()
 	defer r.mu.Unlock()
