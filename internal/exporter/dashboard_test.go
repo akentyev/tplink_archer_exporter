@@ -490,3 +490,45 @@ func TestDashboardDrawsEveryPublishedMetric(t *testing.T) {
 		}
 	}
 }
+
+// forEachTarget calls fn on every target in file order, the panels nested in a
+// row included, with the panel it sits in and the target's JSON path.
+func forEachTarget(panels any, path string, fn func(panel, target map[string]any, path string)) {
+	list, _ := panels.([]any)
+	for i, raw := range list {
+		panel, _ := raw.(map[string]any)
+		panelPath := fmt.Sprintf("%s[%d]", path, i)
+		targets, _ := panel["targets"].([]any)
+		for j, raw := range targets {
+			target, _ := raw.(map[string]any)
+			fn(panel, target, fmt.Sprintf("%s.targets[%d]", panelPath, j))
+		}
+		forEachTarget(panel["panels"], panelPath+".panels", fn)
+	}
+}
+
+// ip is a label on tplink_client_info: a client that changes address starts a
+// new series while the old one is still inside an instant query's lookback, and
+// two right-hand series on one (mac, instance) fail the join. Range queries
+// survive it, VictoriaMetrics merges duplicates whose samples do not overlap.
+const clientInfoJoin = "max by (mac, instance, hostname) (tplink_client_info{"
+
+func TestDashboardInstantJoinsAggregateClientInfo(t *testing.T) {
+	checked := 0
+	forEachTarget(loadDashboard(t)["panels"], "panels", func(panel, target map[string]any, path string) {
+		expr, _ := target["expr"].(string)
+		instant, _ := target["instant"].(bool)
+		if !instant || !strings.Contains(expr, "group_left") || !strings.Contains(expr, "tplink_client_info") {
+			return
+		}
+		checked++
+		if strings.Count(expr, "tplink_client_info") != strings.Count(expr, clientInfoJoin) {
+			t.Errorf("panel %s %q joins on tplink_client_info outside %s...}) in %s.expr; write every mention through that aggregation, or a client that changed address puts two series in the lookback and the query fails on the duplicate",
+				asJSON(panel["id"]), panel["title"], clientInfoJoin, path)
+		}
+	})
+	if checked == 0 {
+		t.Fatalf("%s has no instant target joining on tplink_client_info: either the panels lost their queries or the walk stopped short, and this test proves nothing either way",
+			dashboardPath)
+	}
+}

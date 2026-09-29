@@ -2639,7 +2639,7 @@
       "id": 29,
       "type": "bargauge",
       "title": "Top talkers, last 24 h",
-      "description": "Bytes moved over the last day. increase() handles the counter reset a reboot causes; a window shorter than the exporter's history simply reports less. The join is on (mac, instance), not on (mac): with a second exporter scraped, one MAC finds two matches on the right and the panel errors out instead of drawing.",
+      "description": "Bytes moved over the last day. increase() handles the counter reset a reboot causes; a window shorter than the exporter's history simply reports less. The join is on (mac, instance), not on (mac): with a second exporter scraped, one MAC finds two matches on the right and the panel errors out instead of drawing. The right side is max by (mac, instance, hostname): ip is a label on tplink_client_info, and a client that changes address would otherwise put two series into this instant query's lookback.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -2657,7 +2657,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "topk(10, increase(tplink_client_traffic_bytes_total{instance=~\"$instance\"}[24h]) * on (mac, instance) group_left(hostname) tplink_client_info{instance=~\"$instance\"})",
+          "expr": "topk(10, increase(tplink_client_traffic_bytes_total{instance=~\"$instance\"}[24h]) * on (mac, instance) group_left(hostname) max by (mac, instance, hostname) (tplink_client_info{instance=~\"$instance\"}))",
           "refId": "A",
           "range": false,
           "instant": true,
