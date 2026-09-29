@@ -355,7 +355,10 @@ curl -sX POST http://grafana:3000/api/dashboards/import -u admin:admin \
 Two variables: `datasource` re-points every panel at once, `instance` picks exporters and defaults to all of them.
 
 `ip` and `hostname` live only in `tplink_client_info`, so a client panel that wants a readable name joins against it on
-`(mac, instance)`. The panel descriptions say why `instance` is in there.
+`(mac, instance)`. The panel descriptions say why `instance` is in there. An instant query takes the right side through
+`max by (mac, instance, hostname)`: `ip` is a label there, so a client that changes address puts two series into the
+query's lookback, and the join fails on the duplicate. Range queries survive it: VictoriaMetrics merges duplicate series
+whose samples do not overlap in time.
 
 A permanent lease has no `tplink_dhcp_lease_expiry_seconds` series, so its expiry cells in the lease table are empty
 rather than holding a far-future placeholder, and sorting on "expires in" still puts the soonest first.
