@@ -173,6 +173,197 @@ func TestParseClientsDropsARepeatedMAC(t *testing.T) {
 	}
 }
 
+func wantFloat(v float64) *float64 { return &v }
+
+func wantRadio(signalDBm, txMbits, rxMbits float64) ClientRadio {
+	return ClientRadio{SignalDBm: &signalDBm, TxMbits: &txMbits, RxMbits: &rxMbits}
+}
+
+// sameRadio compares exactly: txrate / 1000 is exact for every rate in the
+// captures.
+func sameRadio(a, b ClientRadio) bool {
+	same := func(x, y *float64) bool {
+		if x == nil || y == nil {
+			return x == y
+		}
+		return *x == *y
+	}
+	return same(a.SignalDBm, b.SignalDBm) && same(a.TxMbits, b.TxMbits) && same(a.RxMbits, b.RxMbits)
+}
+
+func radioText(r ClientRadio) string {
+	one := func(p *float64) string {
+		if p == nil {
+			return "nil"
+		}
+		return fmt.Sprint(*p)
+	}
+	return one(r.SignalDBm) + " / " + one(r.TxMbits) + " / " + one(r.RxMbits)
+}
+
+func radioMapHolds(t *testing.T, got, want map[string]ClientRadio) {
+	t.Helper()
+	for _, mac := range slices.Sorted(maps.Keys(want)) {
+		g, ok := got[mac]
+		switch {
+		case !ok:
+			t.Errorf("no entry for %s, want %s (signal / tx / rx)", mac, radioText(want[mac]))
+		case !sameRadio(g, want[mac]):
+			t.Errorf("%s: got %s, want %s (signal / tx / rx)", mac, radioText(g), radioText(want[mac]))
+		}
+	}
+	for _, mac := range slices.Sorted(maps.Keys(got)) {
+		if _, ok := want[mac]; !ok {
+			t.Errorf("unexpected entry for %s: %s (signal / tx / rx)", mac, radioText(got[mac]))
+		}
+	}
+}
+
+// wantRouterRadio is clients.json: the five wireless rows of the router capture.
+// The other thirteen rows are wired and carry none of signal, txrate, rxrate.
+func wantRouterRadio() map[string]ClientRadio {
+	return map[string]ClientRadio{
+		"00:00:5e:00:53:07": wantRadio(-76, 28, 6),
+		"00:00:5e:00:53:0f": wantRadio(-70, 72, 52),
+		"00:00:5e:00:53:12": wantRadio(-65, 72, 6),
+		"00:00:5e:00:53:06": wantRadio(-77, 6, 6),
+		"00:00:5e:00:53:05": wantRadio(-50, 6, 6),
+	}
+}
+
+// wantAPRadio is ap_clients.json: five rows, all wireless, the same devices as
+// the router capture's wireless ones with other readings.
+func wantAPRadio() map[string]ClientRadio {
+	return map[string]ClientRadio{
+		"00:00:5e:00:53:0f": wantRadio(-61, 72, 65),
+		"00:00:5e:00:53:07": wantRadio(-59, 72, 1),
+		"00:00:5e:00:53:12": wantRadio(-67, 100, 24),
+		"00:00:5e:00:53:06": wantRadio(-73, 6, 6),
+		"00:00:5e:00:53:05": wantRadio(-48, 13, 6),
+	}
+}
+
+func TestParseClientRadio(t *testing.T) {
+	got, err := parseClientRadio(fixture(t, "clients.json"))
+	if err != nil {
+		t.Fatalf("parseClientRadio(clients.json): %v", err)
+	}
+	if len(got) != 5 {
+		t.Errorf("got %d entries, want the 5 wireless clients of clients.json", len(got))
+	}
+	if r, ok := got[macCanonical]; ok {
+		t.Errorf("the wired %s has an entry (%s); its row carries none of signal, txrate and rxrate",
+			macCanonical, radioText(r))
+	}
+	radioMapHolds(t, got, wantRouterRadio())
+}
+
+func TestParseClientRadioAccessPoint(t *testing.T) {
+	got, err := parseClientRadio(fixture(t, "ap_clients.json"))
+	if err != nil {
+		t.Fatalf("parseClientRadio(ap_clients.json): %v", err)
+	}
+	if len(got) != 5 {
+		t.Errorf("got %d entries, want the 5 rows of ap_clients.json", len(got))
+	}
+	radioMapHolds(t, got, wantAPRadio())
+}
+
+func radioProbeRow(n int, keys string) string {
+	return fmt.Sprintf(`{"deviceName":"probe-%[1]d","deviceTag":"2.4G","deviceType":"Other",`+
+		`"ip":"192.0.2.%[1]d","isGuest":false,"mac":"00-00-5E-00-53-%[1]d","onlineTime":5,`+
+		`"trafficUsage":0,"downloadSpeed":0,"uploadSpeed":0,%[2]s}`, n, keys)
+}
+
+// radioProbes are synthetic: the captures carry plain numbers, and the key
+// names are lifted from them.
+func radioProbes() []string {
+	return []string{
+		radioProbeRow(50, `"signal":"-61","txrate":"72000","rxrate":-1`),
+		radioProbeRow(51, `"signal":" -61.5 ","txrate":72000.0,"rxrate":"6000"`),
+		radioProbeRow(52, `"signal":0,"txrate":0,"rxrate":null`),
+		radioProbeRow(53, `"signal":"weak","txrate":{},"rxrate":6000`),
+		radioProbeRow(54, `"signal":5,"txrate":-1`),
+	}
+}
+
+func TestParseClientRadioReadsOnlyValues(t *testing.T) {
+	probes := radioProbes()
+	// A signal of -1 beside rates of -1 and 0, as numbers and as strings: the
+	// signal is read, the rates are not.
+	minusOne := []string{
+		radioProbeRow(55, `"signal":-1,"txrate":-1,"rxrate":0`),
+		radioProbeRow(56, `"signal":"-1","txrate":"-1","rxrate":"0"`),
+	}
+	// strconv.ParseFloat reads -Inf, Inf and NaN, but none is a JSON number: the
+	// row holds no value and gets no entry.
+	nonFinite := radioProbeRow(57, `"signal":"-Inf","txrate":"Inf","rxrate":"NaN"`)
+	// The second row for 50 is spelled as vpn_users.json spells MACs and carries
+	// all three keys with other values: the first row stays, whole.
+	again := `{"deviceName":"probe-50-again","deviceTag":"5G","deviceType":"Other","ip":"192.0.2.50",` +
+		`"isGuest":false,"mac":"00:00:5E:00:53:50","onlineTime":5,"trafficUsage":0,"downloadSpeed":0,` +
+		`"uploadSpeed":0,"signal":-10,"txrate":1000,"rxrate":1000}`
+	// 42 comes before 53: a reader that gave up at a row that is not an object
+	// would lose it.
+	rows := slices.Concat(probes[:3], []string{`42`}, probes[3:], minusOne, []string{nonFinite, again})
+
+	got, err := parseClientRadio(json.RawMessage("[" + strings.Join(rows, ",") + "]"))
+	if err != nil {
+		t.Errorf("parseClientRadio: %v; only a reply that is not a list is an error, and a row that is "+
+			"not an object, a repeated MAC or a value that is not a number costs no more than itself", err)
+	}
+	radioMapHolds(t, got, map[string]ClientRadio{
+		"00:00:5e:00:53:50": {SignalDBm: wantFloat(-61), TxMbits: wantFloat(72)},
+		"00:00:5e:00:53:51": wantRadio(-61.5, 72, 6),
+		"00:00:5e:00:53:53": {RxMbits: wantFloat(6)},
+		"00:00:5e:00:53:55": {SignalDBm: wantFloat(-1)},
+		"00:00:5e:00:53:56": {SignalDBm: wantFloat(-1)},
+	})
+}
+
+func TestRadioFieldsCostParseClientsNothing(t *testing.T) {
+	got, err := parseClients(json.RawMessage("[" + strings.Join(radioProbes(), ",") + "]"))
+	if err != nil {
+		t.Errorf("parseClients: %v; a signal that is a word, a rate that is an object or a null cost "+
+			"the row nothing", err)
+	}
+	if len(got) != 5 {
+		t.Errorf("got %d clients, want the 5 probe rows", len(got))
+	}
+	for _, n := range []string{"50", "51", "52", "53", "54"} {
+		c := clientByMAC(t, got, "00:00:5e:00:53:"+n)
+		if want := "probe-" + n; c.Hostname != want || c.IP != "192.0.2."+n {
+			t.Errorf("00:00:5e:00:53:%s: parsed %+v, want hostname %s and address 192.0.2.%s", n, c, want, n)
+		}
+	}
+}
+
+func TestClientRadioNeedsAList(t *testing.T) {
+	for _, tc := range []struct {
+		name, reply string
+		wantErr     bool
+	}{
+		{"an object with a key", `{"a":1}`, true},
+		// A load endpoint answers {} when it holds no entries.
+		{"the empty object a load endpoint sends", `{}`, false},
+		{"an empty list", `[]`, false},
+		{"a reply cut short", `[{"mac":"00-00-5E-00-53-0F","signal":-70},`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseClientRadio(json.RawMessage(tc.reply))
+			switch {
+			case tc.wantErr && err == nil:
+				t.Errorf("parseClientRadio(%s) returned no error; a reply that is not a list is one", tc.reply)
+			case !tc.wantErr && err != nil:
+				t.Errorf("parseClientRadio(%s): %v; an empty list is not an error", tc.reply, err)
+			}
+			if !tc.wantErr && len(got) != 0 {
+				t.Errorf("parseClientRadio(%s) returned %d entries, want 0", tc.reply, len(got))
+			}
+		})
+	}
+}
+
 func TestParseClientTimes(t *testing.T) {
 	times := loadClientTimes(t)
 	if len(times) != 18 {

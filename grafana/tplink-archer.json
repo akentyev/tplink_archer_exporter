@@ -90,6 +90,99 @@
       "panels": []
     },
     {
+      "id": 66,
+      "type": "stat",
+      "title": "Mode",
+      "description": "The operation mode the router named at login. On an access point the exporter does not poll VPN, ARP, remote management, UPnP, NAT, firewall or WAN speed, and publishes no WAN uptime, no WAN link and no client traffic, so the panels drawing those read No data there. No data here means the login named no mode, the exporter is older than tplink_operation_mode_info, or there is no current snapshot: none taken yet, or one older than five poll intervals.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 0,
+        "y": 1
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "tplink_operation_mode_info{instance=~\"$instance\"}",
+          "refId": "A",
+          "range": false,
+          "instant": true,
+          "legendFormat": "{{mode}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "router": {
+                  "text": "Router",
+                  "index": 0
+                },
+                "ap": {
+                  "text": "Access point",
+                  "index": 1
+                }
+              }
+            }
+          ],
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "text"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "/^Field$/",
+          "values": true
+        },
+        "orientation": "horizontal",
+        "textMode": "value",
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "showPercentChange": false,
+        "wideLayout": true,
+        "percentChangeColorMode": "standard"
+      },
+      "pluginVersion": "11.6.0",
+      "transformations": [
+        {
+          "id": "reduce",
+          "options": {
+            "mode": "seriesToRows",
+            "reducers": [
+              "lastNotNull"
+            ]
+          }
+        }
+      ]
+    },
+    {
       "id": 2,
       "type": "stat",
       "title": "Router reachable",
@@ -101,7 +194,7 @@
       "gridPos": {
         "h": 4,
         "w": 3,
-        "x": 0,
+        "x": 3,
         "y": 1
       },
       "targets": [
@@ -188,7 +281,7 @@
       "gridPos": {
         "h": 4,
         "w": 3,
-        "x": 3,
+        "x": 6,
         "y": 1
       },
       "targets": [
@@ -275,7 +368,7 @@
       "gridPos": {
         "h": 4,
         "w": 3,
-        "x": 6,
+        "x": 9,
         "y": 1
       },
       "targets": [
@@ -342,7 +435,7 @@
       "id": 5,
       "type": "stat",
       "title": "Internet",
-      "description": "Reachability as the router reports it, not the physical WAN port — that is the link series in the WAN row.",
+      "description": "Reachability as the router reports it, not the physical WAN port — that is the link series in the WAN row, which an access point does not publish.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -350,7 +443,7 @@
       "gridPos": {
         "h": 4,
         "w": 3,
-        "x": 9,
+        "x": 12,
         "y": 1
       },
       "targets": [
@@ -436,8 +529,8 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 4,
-        "x": 12,
+        "w": 3,
+        "x": 15,
         "y": 1
       },
       "targets": [
@@ -505,7 +598,7 @@
       "gridPos": {
         "h": 4,
         "w": 3,
-        "x": 16,
+        "x": 18,
         "y": 1
       },
       "targets": [
@@ -572,8 +665,8 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 5,
-        "x": 19,
+        "w": 3,
+        "x": 21,
         "y": 1
       },
       "targets": [
@@ -617,7 +710,7 @@
           "fields": "",
           "values": false
         },
-        "orientation": "auto",
+        "orientation": "horizontal",
         "textMode": "name",
         "colorMode": "none",
         "graphMode": "none",
@@ -1221,7 +1314,7 @@
       "id": 18,
       "type": "state-timeline",
       "title": "WAN link and reachability",
-      "description": "internet is reachability as the router judges it; link is the physical WAN port. The port can be up while the connection is not.",
+      "description": "internet is reachability as the router judges it; link is the physical WAN port. The port can be up while the connection is not. An access point publishes no link series: wan_internet_status reads unplugged there while the WAN port carries the uplink.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -2540,7 +2633,7 @@
       "id": 28,
       "type": "timeseries",
       "title": "Top 10 clients by traffic rate",
-      "description": "Derived from the byte counter, which resets on reboot — rate() absorbs that. Numeric client metrics carry mac alone, so the join against tplink_client_info is what supplies a readable name. The join is on (mac, instance), not on (mac): with a second exporter scraped, one MAC finds two matches on the right and the panel errors out instead of drawing.",
+      "description": "Derived from the byte counter, which resets on reboot — rate() absorbs that. Numeric client metrics carry mac alone, so the join against tplink_client_info is what supplies a readable name. The join is on (mac, instance), not on (mac): with a second exporter scraped, one MAC finds two matches on the right and the panel errors out instead of drawing. The right side is max by (mac, instance, hostname): every other label on tplink_client_info can change between cycles, and two series in the lookback fail the join. An access point publishes no client traffic: its firmware reads 0 for every client.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -2558,11 +2651,11 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "topk(10, rate(tplink_client_traffic_bytes_total{instance=~\"$instance\"}[5m]) * on (mac, instance) group_left(hostname) tplink_client_info{instance=~\"$instance\"})",
+          "expr": "topk(10, label_replace(rate(tplink_client_traffic_bytes_total{instance=~\"$instance\"}[5m]) * on (mac, instance) group_left(hostname) max by (mac, instance, hostname) (tplink_client_info{instance=~\"$instance\"}), \"mac_tail\", \"$1\", \"mac\", \".*:([0-9a-f]{2}:[0-9a-f]{2})\"))",
           "refId": "A",
           "range": true,
           "instant": false,
-          "legendFormat": "{{hostname}}"
+          "legendFormat": "{{hostname}} ({{mac_tail}})"
         }
       ],
       "fieldConfig": {
@@ -2639,7 +2732,7 @@
       "id": 29,
       "type": "bargauge",
       "title": "Top talkers, last 24 h",
-      "description": "Bytes moved over the last day. increase() handles the counter reset a reboot causes; a window shorter than the exporter's history simply reports less. The join is on (mac, instance), not on (mac): with a second exporter scraped, one MAC finds two matches on the right and the panel errors out instead of drawing. The right side is max by (mac, instance, hostname): ip is a label on tplink_client_info, and a client that changes address would otherwise put two series into this instant query's lookback.",
+      "description": "Bytes moved over the last day. increase() handles the counter reset a reboot causes; a window shorter than the exporter's history simply reports less. The join is on (mac, instance), not on (mac): with a second exporter scraped, one MAC finds two matches on the right and the panel errors out instead of drawing. The right side is max by (mac, instance, hostname): every other label on tplink_client_info can change between cycles, and two series in the lookback fail the join. An access point publishes no client traffic: its firmware reads 0 for every client.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -2657,11 +2750,11 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "topk(10, increase(tplink_client_traffic_bytes_total{instance=~\"$instance\"}[24h]) * on (mac, instance) group_left(hostname) max by (mac, instance, hostname) (tplink_client_info{instance=~\"$instance\"}))",
+          "expr": "topk(10, label_replace(increase(tplink_client_traffic_bytes_total{instance=~\"$instance\"}[24h]) * on (mac, instance) group_left(hostname) max by (mac, instance, hostname) (tplink_client_info{instance=~\"$instance\"}), \"mac_tail\", \"$1\", \"mac\", \".*:([0-9a-f]{2}:[0-9a-f]{2})\"))",
           "refId": "A",
           "range": false,
           "instant": true,
-          "legendFormat": "{{hostname}}"
+          "legendFormat": "{{hostname}} ({{mac_tail}})"
         }
       ],
       "fieldConfig": {
@@ -2732,11 +2825,11 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max by (mac, hostname) (tplink_client_info{instance=~\"$instance\"})",
+          "expr": "label_replace(max by (mac, hostname) (tplink_client_info{instance=~\"$instance\"}), \"mac_tail\", \"$1\", \"mac\", \".*:([0-9a-f]{2}:[0-9a-f]{2})\")",
           "refId": "A",
           "range": true,
           "instant": false,
-          "legendFormat": "{{hostname}}"
+          "legendFormat": "{{hostname}} ({{mac_tail}})"
         }
       ],
       "fieldConfig": {
@@ -2807,7 +2900,7 @@
       "id": 31,
       "type": "table",
       "title": "Clients",
-      "description": "ip and hostname come from tplink_client_info because that is the only series carrying them; everything numeric is joined on mac. Rate is the counter behind the graphs above and misses no bytes; Down and Up are the router's own gauges, averaged over the same five minutes, and carry the direction the counter does not. The gauges are point samples, so the two need not agree.",
+      "description": "ip and hostname come from tplink_client_info because that is the only series carrying them; everything numeric is joined on mac. Rate is the counter behind the graphs above and misses no bytes; Down and Up are the router's own gauges, averaged over the same five minutes, and carry the direction the counter does not. The gauges are point samples, so the two need not agree. Signal, Tx rate and Rx rate exist for wireless clients only. The rates are link rates, not throughput; the web UI's tooltip calls them a theoretical maximum. On an access point the exporter publishes no client traffic, so its clients have no Down, Up, Rate or Traffic.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -2905,6 +2998,45 @@
           "editorMode": "code",
           "expr": "max by (mac) (rate(tplink_client_traffic_bytes_total{instance=~\"$instance\"}[5m]))",
           "refId": "G",
+          "range": false,
+          "instant": true,
+          "legendFormat": "",
+          "format": "table"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "max by (mac) (tplink_client_signal_dbm{instance=~\"$instance\"})",
+          "refId": "H",
+          "range": false,
+          "instant": true,
+          "legendFormat": "",
+          "format": "table"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "max by (mac) (tplink_client_tx_rate_mbits{instance=~\"$instance\"})",
+          "refId": "I",
+          "range": false,
+          "instant": true,
+          "legendFormat": "",
+          "format": "table"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "max by (mac) (tplink_client_rx_rate_mbits{instance=~\"$instance\"})",
+          "refId": "J",
           "range": false,
           "instant": true,
           "legendFormat": "",
@@ -3014,6 +3146,54 @@
               {
                 "id": "min",
                 "value": 0
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Signal"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "suffix:dBm"
+              },
+              {
+                "id": "custom.width",
+                "value": 100
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Tx rate"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "Mbits"
+              },
+              {
+                "id": "custom.width",
+                "value": 100
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Rx rate"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "Mbits"
+              },
+              {
+                "id": "custom.width",
+                "value": 100
               }
             ]
           },
@@ -3145,7 +3325,10 @@
               "job": true,
               "instance": true,
               "Value #A": true,
-              "Time 7": true
+              "Time 7": true,
+              "Time 8": true,
+              "Time 9": true,
+              "Time 10": true
             },
             "renameByName": {
               "mac": "MAC",
@@ -3159,7 +3342,10 @@
               "Value #D": "Session",
               "Value #E": "Connected since",
               "Value #F": "Traffic",
-              "Value #G": "Rate"
+              "Value #G": "Rate",
+              "Value #H": "Signal",
+              "Value #I": "Tx rate",
+              "Value #J": "Rx rate"
             },
             "indexByName": {
               "hostname": 0,
@@ -3171,9 +3357,12 @@
               "Value #B": 6,
               "Value #C": 7,
               "Value #G": 8,
-              "Value #F": 9,
-              "Value #D": 10,
-              "Value #E": 11
+              "Value #H": 9,
+              "Value #I": 10,
+              "Value #J": 11,
+              "Value #F": 12,
+              "Value #D": 13,
+              "Value #E": 14
             }
           }
         }
@@ -3283,7 +3472,7 @@
       "id": 33,
       "type": "timeseries",
       "title": "Longest sessions, top 10",
-      "description": "Session length restarts on reconnect, so a sawtooth here is a device that keeps dropping off. The join is on (mac, instance), not on (mac): with a second exporter scraped, one MAC finds two matches on the right and the panel errors out instead of drawing.",
+      "description": "Session length restarts on reconnect, so a sawtooth here is a device that keeps dropping off. The join is on (mac, instance), not on (mac): with a second exporter scraped, one MAC finds two matches on the right and the panel errors out instead of drawing. The right side is max by (mac, instance, hostname): every other label on tplink_client_info can change between cycles, and two series in the lookback fail the join.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -3301,11 +3490,11 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "topk(10, tplink_client_session_seconds{instance=~\"$instance\"} * on (mac, instance) group_left(hostname) tplink_client_info{instance=~\"$instance\"})",
+          "expr": "topk(10, label_replace(tplink_client_session_seconds{instance=~\"$instance\"} * on (mac, instance) group_left(hostname) max by (mac, instance, hostname) (tplink_client_info{instance=~\"$instance\"}), \"mac_tail\", \"$1\", \"mac\", \".*:([0-9a-f]{2}:[0-9a-f]{2})\"))",
           "refId": "A",
           "range": true,
           "instant": false,
-          "legendFormat": "{{hostname}}"
+          "legendFormat": "{{hostname}} ({{mac_tail}})"
         }
       ],
       "fieldConfig": {
@@ -3379,6 +3568,105 @@
       "pluginVersion": "11.6.0"
     },
     {
+      "id": 67,
+      "type": "timeseries",
+      "title": "Client signal",
+      "description": "Signal level the router reports for each wireless client; the values read as dBm, and wired clients have none. The join is on (mac, instance), not on (mac): with a second exporter scraped, one MAC finds two matches on the right and the panel errors out instead of drawing. The right side is max by (mac, instance, hostname): every other label on tplink_client_info can change between cycles, and two series in the lookback fail the join.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 73
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "label_replace(tplink_client_signal_dbm{instance=~\"$instance\"} * on (mac, instance) group_left(hostname) max by (mac, instance, hostname) (tplink_client_info{instance=~\"$instance\"}), \"mac_tail\", \"$1\", \"mac\", \".*:([0-9a-f]{2}:[0-9a-f]{2})\")",
+          "refId": "A",
+          "range": true,
+          "instant": false,
+          "legendFormat": "{{hostname}} ({{mac_tail}})"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "gradientMode": "opacity",
+            "spanNulls": false,
+            "showPoints": "never",
+            "pointSize": 5,
+            "barAlignment": 0,
+            "axisPlacement": "auto",
+            "axisLabel": "",
+            "axisColorMode": "text",
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "thresholdsStyle": {
+              "mode": "off"
+            },
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "mappings": [],
+          "unit": "suffix:dBm"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "min",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc",
+          "hideZeros": false
+        }
+      },
+      "pluginVersion": "11.6.0"
+    },
+    {
       "id": 34,
       "type": "row",
       "title": "DHCP",
@@ -3387,7 +3675,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 73
+        "y": 81
       },
       "panels": []
     },
@@ -3404,7 +3692,7 @@
         "h": 12,
         "w": 18,
         "x": 0,
-        "y": 74
+        "y": 82
       },
       "targets": [
         {
@@ -3772,7 +4060,7 @@
         "h": 3,
         "w": 6,
         "x": 18,
-        "y": 74
+        "y": 82
       },
       "targets": [
         {
@@ -3840,7 +4128,7 @@
         "h": 3,
         "w": 6,
         "x": 18,
-        "y": 77
+        "y": 85
       },
       "targets": [
         {
@@ -3908,7 +4196,7 @@
         "h": 3,
         "w": 6,
         "x": 18,
-        "y": 80
+        "y": 88
       },
       "targets": [
         {
@@ -3976,7 +4264,7 @@
         "h": 3,
         "w": 6,
         "x": 18,
-        "y": 83
+        "y": 91
       },
       "targets": [
         {
@@ -4043,7 +4331,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 86
+        "y": 94
       },
       "panels": []
     },
@@ -4060,7 +4348,7 @@
         "h": 7,
         "w": 12,
         "x": 0,
-        "y": 87
+        "y": 95
       },
       "targets": [
         {
@@ -4308,7 +4596,7 @@
         "h": 7,
         "w": 12,
         "x": 12,
-        "y": 87
+        "y": 95
       },
       "targets": [
         {
@@ -4409,8 +4697,8 @@
     {
       "id": 43,
       "type": "table",
-      "title": "VPN server users",
-      "description": "Permission to use the router's own VPN server, not an active session — the firmware does not report who is connected.",
+      "title": "VPN client devices",
+      "description": "Devices in the VPN client's device list and their VPN Access switch — a setting, not an active session: the firmware does not report whose traffic is in the tunnel.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -4419,7 +4707,7 @@
         "h": 6,
         "w": 16,
         "x": 0,
-        "y": 94
+        "y": 102
       },
       "targets": [
         {
@@ -4572,8 +4860,8 @@
     {
       "id": 44,
       "type": "stat",
-      "title": "VPN server",
-      "description": "1 when the router's own VPN server is switched on. Says nothing about the outbound tunnels above.",
+      "title": "VPN client",
+      "description": "1 when the VPN client is switched on (vpn?form=enable, on the web UI's VPN Client page). The tunnels above are that client's, and the web UI shows them and the device list only while it is on.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -4582,7 +4870,7 @@
         "h": 6,
         "w": 8,
         "x": 16,
-        "y": 94
+        "y": 102
       },
       "targets": [
         {
@@ -4595,7 +4883,7 @@
           "refId": "A",
           "range": true,
           "instant": false,
-          "legendFormat": "server"
+          "legendFormat": "client"
         }
       ],
       "fieldConfig": {
@@ -4665,7 +4953,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 100
+        "y": 108
       },
       "panels": []
     },
@@ -4682,7 +4970,7 @@
         "h": 4,
         "w": 4,
         "x": 0,
-        "y": 101
+        "y": 109
       },
       "targets": [
         {
@@ -4769,7 +5057,7 @@
         "h": 4,
         "w": 4,
         "x": 4,
-        "y": 101
+        "y": 109
       },
       "targets": [
         {
@@ -4856,7 +5144,7 @@
         "h": 4,
         "w": 4,
         "x": 8,
-        "y": 101
+        "y": 109
       },
       "targets": [
         {
@@ -4943,7 +5231,7 @@
         "h": 4,
         "w": 4,
         "x": 12,
-        "y": 101
+        "y": 109
       },
       "targets": [
         {
@@ -5030,7 +5318,7 @@
         "h": 4,
         "w": 8,
         "x": 16,
-        "y": 101
+        "y": 109
       },
       "targets": [
         {
@@ -5101,7 +5389,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 105
+        "y": 113
       },
       "targets": [
         {
@@ -5203,7 +5491,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 113
+        "y": 121
       },
       "panels": []
     },
@@ -5220,7 +5508,7 @@
         "h": 7,
         "w": 12,
         "x": 0,
-        "y": 114
+        "y": 122
       },
       "targets": [
         {
@@ -5375,7 +5663,7 @@
         "h": 7,
         "w": 12,
         "x": 12,
-        "y": 114
+        "y": 122
       },
       "targets": [
         {
@@ -5511,7 +5799,7 @@
         "h": 6,
         "w": 8,
         "x": 0,
-        "y": 121
+        "y": 129
       },
       "targets": [
         {
@@ -5607,7 +5895,7 @@
         "h": 6,
         "w": 4,
         "x": 8,
-        "y": 121
+        "y": 129
       },
       "targets": [
         {
@@ -5682,7 +5970,7 @@
         "h": 6,
         "w": 6,
         "x": 12,
-        "y": 121
+        "y": 129
       },
       "targets": [
         {
@@ -5749,7 +6037,7 @@
         "h": 6,
         "w": 6,
         "x": 18,
-        "y": 121
+        "y": 129
       },
       "targets": [
         {
@@ -5817,7 +6105,7 @@
         "h": 4,
         "w": 6,
         "x": 0,
-        "y": 127
+        "y": 135
       },
       "targets": [
         {
@@ -5884,7 +6172,7 @@
         "h": 4,
         "w": 12,
         "x": 6,
-        "y": 127
+        "y": 135
       },
       "targets": [
         {
@@ -5978,7 +6266,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 132
+        "y": 140
       },
       "panels": [
         {
@@ -5994,7 +6282,7 @@
             "h": 6,
             "w": 7,
             "x": 0,
-            "y": 133
+            "y": 141
           },
           "targets": [
             {
@@ -6091,7 +6379,7 @@
             "h": 6,
             "w": 7,
             "x": 7,
-            "y": 133
+            "y": 141
           },
           "targets": [
             {
@@ -6218,7 +6506,7 @@
             "h": 6,
             "w": 5,
             "x": 14,
-            "y": 133
+            "y": 141
           },
           "targets": [
             {
@@ -6289,7 +6577,7 @@
             "h": 6,
             "w": 5,
             "x": 19,
-            "y": 133
+            "y": 141
           },
           "targets": [
             {

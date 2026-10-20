@@ -10,6 +10,10 @@ import "time"
 type Snapshot struct {
 	TakenAt time.Time
 
+	// Mode is the operation mode the cycle was polled under, as
+	// tpapi.Client.Mode reports it; "" when the device named none.
+	Mode string
+
 	Firmware *Firmware
 	WAN      *WAN
 	Perf     *Perf
@@ -18,7 +22,8 @@ type Snapshot struct {
 	Wireless map[string]Radio
 	Mesh     []MeshNode
 
-	Clients []Client
+	Clients     []Client
+	ClientRadio map[string]ClientRadio
 
 	Leases       []Lease
 	Reservations []Reservation
@@ -53,7 +58,9 @@ type WAN struct {
 
 	HaveStatus bool
 	InternetUp bool // status?form=internet, internet_status
-	LinkUp     bool // wan_internet_status
+	// LinkUp is wan_internet_status. On an access point it reads unplugged while
+	// the WAN port is up.
+	LinkUp bool
 	// State is internet_status lowercased: connected, poor_connected,
 	// connecting, disconnected or unplugged. InternetUp collapses those five.
 	State string
@@ -129,6 +136,15 @@ type Client struct {
 	Via         string // connect_device_mac, normalised: which mesh node
 }
 
+// ClientRadio is what game_accelerator reports about a wireless link, keyed
+// by normalised MAC in Snapshot.ClientRadio. A nil field is one the reply
+// did not carry, or carried as no value.
+type ClientRadio struct {
+	SignalDBm *float64 // signal, only below zero
+	TxMbits   *float64 // txrate / 1000, only above zero
+	RxMbits   *float64 // rxrate / 1000, only above zero
+}
+
 // Lease is a DHCP lease. Permanent means there is no expiry, which is not the
 // same as being reserved — see Reservation.
 type Lease struct {
@@ -165,13 +181,16 @@ type Tunnel struct {
 	UpBytesPerS   float64
 }
 
+// VPNServer is the VPN client's on/off switch, vpn?form=enable, which the web
+// UI reads and writes only on its VPN Client page.
 type VPNServer struct {
 	Enabled bool
 	Type    string
 }
 
-// VPNUser is an account on the router's VPN server. Access is permission, not
-// an active session; the firmware does not report who is connected.
+// VPNUser is a device in the VPN client's device list, vpn?form=vpn_user_list.
+// Access is the device's VPN Access switch there: a setting, not an active
+// session; the firmware does not report who is connected.
 type VPNUser struct {
 	MAC        string
 	Name       string

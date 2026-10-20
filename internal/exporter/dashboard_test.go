@@ -507,28 +507,142 @@ func forEachTarget(panels any, path string, fn func(panel, target map[string]any
 	}
 }
 
-// ip is a label on tplink_client_info: a client that changes address starts a
-// new series while the old one is still inside an instant query's lookback, and
-// two right-hand series on one (mac, instance) fail the join. Range queries
-// survive it, VictoriaMetrics merges duplicates whose samples do not overlap.
+// Every label this drops can change between cycles: ip on a new lease, iface,
+// guest, via and type as the firmware reports them. Two series in one lookback
+// window fail the join on the duplicate, in a range query too: VictoriaMetrics
+// v1.153.0 without staleness markers merges a one-off change there, not one
+// that alternates. An alternating hostname gives two series, no error.
 const clientInfoJoin = "max by (mac, instance, hostname) (tplink_client_info{"
 
-func TestDashboardInstantJoinsAggregateClientInfo(t *testing.T) {
+func TestDashboardJoinsAggregateClientInfo(t *testing.T) {
 	checked := 0
 	forEachTarget(loadDashboard(t)["panels"], "panels", func(panel, target map[string]any, path string) {
 		expr, _ := target["expr"].(string)
-		instant, _ := target["instant"].(bool)
-		if !instant || !strings.Contains(expr, "group_left") || !strings.Contains(expr, "tplink_client_info") {
+		if !strings.Contains(expr, "group_left") || !strings.Contains(expr, "tplink_client_info") {
 			return
 		}
 		checked++
 		if strings.Count(expr, "tplink_client_info") != strings.Count(expr, clientInfoJoin) {
-			t.Errorf("panel %s %q joins on tplink_client_info outside %s...}) in %s.expr; write every mention through that aggregation, or a client that changed address puts two series in the lookback and the query fails on the duplicate",
+			t.Errorf("panel %s %q joins on tplink_client_info outside %s...}) in %s.expr; write every mention through that aggregation: every label it drops can change between cycles (ip on a new lease, iface, guest, via and type as the firmware reports them), and two series in one lookback window fail the join on the duplicate, in a range query as much as in an instant one",
 				asJSON(panel["id"]), panel["title"], clientInfoJoin, path)
 		}
 	})
 	if checked == 0 {
-		t.Fatalf("%s has no instant target joining on tplink_client_info: either the panels lost their queries or the walk stopped short, and this test proves nothing either way",
+		t.Fatalf("%s has no target joining on tplink_client_info: either the panels lost their queries or the walk stopped short, and this test proves nothing either way",
 			dashboardPath)
+	}
+}
+
+// PromQL allows whitespace between a function name and its parenthesis, and an
+// aggregation's by or without clause before its arguments. topk_max and the
+// other _* variants are MetricsQL's.
+var (
+	rankCall     = regexp.MustCompile(`\b(?:topk|bottomk)(?:_[a-z]+)?\s*(?:(?:by|without)\s*)?\(`)
+	orderedStart = regexp.MustCompile(`^\s*(?:(?:topk|bottomk)(?:_[a-z]+)?|sort|sort_desc)\s*\(`)
+)
+
+// oneCall reports whether expr is a single call orderedStart names, with
+// nothing after its closing parenthesis. A by or without clause fails it: no
+// grouped ranking was measured. Parentheses inside a string do not count; a
+// backquoted string takes no escapes.
+func oneCall(expr string) bool {
+	if !orderedStart.MatchString(expr) {
+		return false
+	}
+	depth, quote := 0, byte(0)
+	for i := 0; i < len(expr); i++ {
+		switch c := expr[i]; {
+		case quote != 0 && quote != '`' && c == '\\':
+			i++
+		case quote != 0:
+			if c == quote {
+				quote = 0
+			}
+		case c == '"' || c == '\'' || c == '`':
+			quote = c
+		case c == '(':
+			depth++
+		case c == ')':
+			depth--
+			if depth == 0 {
+				return strings.TrimSpace(expr[i+1:]) == ""
+			}
+		}
+	}
+	return false
+}
+
+// A panel drawn from an instant query shows the series in the order the query
+// returns them. VictoriaMetrics, the dashboard's datasource, sorts them by
+// labels unless the whole expr is one call to topk, bottomk, one of their _*
+// variants, sort or sort_desc. Measured on v1.153.0: the rule is
+// VictoriaMetrics', not PromQL's.
+func TestDashboardRankedInstantPanelsKeepTheirOrder(t *testing.T) {
+	checked := 0
+	forEachTarget(loadDashboard(t)["panels"], "panels", func(panel, target map[string]any, path string) {
+		expr, _ := target["expr"].(string)
+		instant, _ := target["instant"].(bool)
+		if !instant || !rankCall.MatchString(expr) {
+			return
+		}
+		checked++
+		if !oneCall(expr) {
+			t.Errorf("panel %s %q ranks with topk or bottomk in %s.expr, and the expr is not a single call to topk, bottomk, one of their _* variants, sort or sort_desc: VictoriaMetrics returns an instant query's series sorted by labels unless one of those calls is the whole expr, and the panel draws them in that order",
+				asJSON(panel["id"]), panel["title"], path)
+		}
+	})
+	if checked == 0 {
+		t.Fatalf("%s has no instant target calling topk, bottomk or one of their _* variants: either the panels lost their queries or the walk stopped short, and this test proves nothing either way",
+			dashboardPath)
+	}
+}
+
+// The dashboard carries one ranked instant target, and a rule with a hole in it
+// passes on that one. The shapes it has to tell apart are written here.
+func TestDashboardOrderRuleReadsTheWholeExpr(t *testing.T) {
+	const (
+		x    = `increase(tplink_client_traffic_bytes_total{instance=~"$instance"}[24h])`
+		tail = `, "mac_tail", "$1", "mac", ".*:([0-9a-f]{2}:[0-9a-f]{2})")`
+	)
+	for _, tc := range []struct {
+		name    string
+		expr    string
+		ranks   bool // rankCall matches, so the dashboard test checks the expr
+		ordered bool // what oneCall answers
+	}{
+		// Measured on VictoriaMetrics v1.153.0 with panel 29's join in place of
+		// x: ordered is whether the series came back in value order.
+		{"topk", "topk(10, label_replace(" + x + tail + ")", true, true},
+		{"topk_max", "topk_max(10, label_replace(" + x + tail + ")", true, true},
+		{"sort_desc around label_replace around topk", "sort_desc(label_replace(topk(10, " + x + ")" + tail + ")", true, true},
+		{"label_replace around topk", "label_replace(topk(10, " + x + ")" + tail, true, false},
+		{"label_replace around topk_max", "label_replace(topk_max(10, " + x + ")" + tail, true, false},
+		{"a comparison after topk", "topk(10, label_replace(" + x + tail + ") > 0", true, false},
+		{"arithmetic after topk", "topk(10, label_replace(" + x + tail + ") * 8", true, false},
+		{"or vector(0) after topk", "topk(10, label_replace(" + x + tail + ") or vector(0)", true, false},
+
+		// How the text is read; not measured.
+		{"whitespace around the call", " topk (10, " + x + ")\n", true, true},
+		{"bottomk", "bottomk(3, " + x + ")", true, true},
+		{"a by clause before the arguments", "topk by (instance) (10, " + x + ")", true, false},
+		{"a by clause after the arguments", "topk(10, " + x + ") by (instance)", true, false},
+		{"sort_by_label around topk", "sort_by_label(topk(10, " + x + `), "mac")`, true, false},
+		{"a parenthesis in a double-quoted string", "topk(10, label_replace(" + x + `, "tail", ")", "mac", ".*"))`, true, true},
+		{"a parenthesis after an escaped quote", "topk(10, label_replace(" + x + `, "tail", "\")", "mac", ".*"))`, true, true},
+		{"a parenthesis in a single-quoted string", "topk(10, label_replace(" + x + `, 'tail', ')', 'mac', '.*'))`, true, true},
+		{"a parenthesis in a backquoted string", "topk(10, label_replace(" + x + ", `tail`, `)`, `mac`, `.*`))", true, true},
+		{"a backslash ending a backquoted string", "topk(10, label_replace(" + x + ", `tail`, `\\`, `mac`, `.*`))", true, true},
+		{"an unclosed call", "topk(10, " + x, true, false},
+		{"a parenthesis too many", "topk(10, " + x + "))", true, false},
+		{"sort_desc without a ranking", "sort_desc(" + x + ")", false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := rankCall.MatchString(tc.expr); got != tc.ranks {
+				t.Errorf("rankCall matches %q: %v, want %v", tc.expr, got, tc.ranks)
+			}
+			if got := oneCall(tc.expr); got != tc.ordered {
+				t.Errorf("oneCall(%q) = %v, want %v", tc.expr, got, tc.ordered)
+			}
+		})
 	}
 }

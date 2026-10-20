@@ -15,6 +15,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -37,9 +38,19 @@ type fakeRouter struct {
 	// busy makes the first login attempt report the single-session conflict.
 	busy bool
 
+	// mode is the "mode" the keys reply carries.
+	mode any
+
+	keysRequests atomic.Int32
+
 	cipher *Cipher // server-side session key, learned from the login signature
 	t      *testing.T
 }
+
+type omittedMode struct{}
+
+// noMode, as fakeRouter.mode, leaves the key out of the keys reply.
+var noMode omittedMode
 
 func (f *fakeRouter) features() Features { return FeaturesFor(f.certs) }
 
@@ -225,7 +236,7 @@ func newFakeRouter(t *testing.T, certs []string) (*httptest.Server, *fakeRouter)
 	}
 	f := &fakeRouter{
 		key: key, certs: certs, seq: 576798567,
-		username: "admin", password: "s3cr3t", stok: "deadbeef", t: t,
+		username: "admin", password: "s3cr3t", stok: "deadbeef", mode: "router", t: t,
 	}
 
 	mux := http.NewServeMux()
@@ -239,9 +250,13 @@ func newFakeRouter(t *testing.T, certs []string) (*httptest.Server, *fakeRouter)
 			plainReply(w, map[string]any{"certification": f.certs, "productModel": "Archer AX80"})
 
 		case strings.HasSuffix(path, ";stok=/login") && q.Get("form") == "keys":
-			// The real firmware adds unrelated scalars here.
-			plainReply(w, map[string]any{
-				"password": []string{nHex, eHex}, "mode": "router", "username": ""})
+			f.keysRequests.Add(1)
+			// The real firmware sends username and mode beside the pair.
+			keys := map[string]any{"password": []string{nHex, eHex}, "username": ""}
+			if f.mode != noMode {
+				keys["mode"] = f.mode
+			}
+			plainReply(w, keys)
 
 		case strings.HasSuffix(path, ";stok=/login") && q.Get("form") == "auth":
 			plainReply(w, map[string]any{"key": []string{nHex, eHex}, "seq": f.seq})
@@ -572,5 +587,115 @@ func TestFetchKeyMissingFieldNamesWhatArrived(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "mode") || !strings.Contains(err.Error(), "username") {
 		t.Fatalf("error should list the fields that did arrive, got %v", err)
+	}
+}
+
+func TestModeIsEmptyBeforeLogin(t *testing.T) {
+	srv, f := newFakeRouter(t, []string{CertSGL1S2})
+	c, err := New(srv.URL, f.username, f.password, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c.Mode(); got != "" {
+		t.Fatalf("Mode() = %q before any Login, want it empty", got)
+	}
+}
+
+func TestModeComesFromTheKeysReply(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		mode any // what the fake's keys reply carries under "mode"
+		want string
+	}{
+		{"router", "router", "router"},
+		{"ap", "ap", "ap"},
+		{"padded and upper case", " AP ", "ap"},
+		{"key absent", noMode, ""},
+		{"a number", 1, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, f := newFakeRouter(t, []string{CertSGL1S2})
+			f.mode = tc.mode
+			c, err := New(srv.URL, f.username, f.password, 5*time.Second)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := c.Login(context.Background()); err != nil {
+				t.Fatalf("login: %v", err)
+			}
+			if got := c.Mode(); got != tc.want {
+				t.Fatalf("Mode() = %q, want %q, after a login whose keys reply carries mode %#v",
+					got, tc.want, tc.mode)
+			}
+		})
+	}
+}
+
+func TestModeFollowsTheLatestLogin(t *testing.T) {
+	srv, f := newFakeRouter(t, []string{CertSGL1S2})
+	c, err := New(srv.URL, f.username, f.password, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+
+	if err := c.Login(ctx); err != nil {
+		t.Fatalf("first login: %v", err)
+	}
+	if got := c.Mode(); got != "router" {
+		t.Fatalf("Mode() = %q after the first login, want %q", got, "router")
+	}
+	if err := c.Logout(ctx); err != nil {
+		t.Fatalf("logout: %v", err)
+	}
+
+	f.mode = "ap"
+	if err := c.Login(ctx); err != nil {
+		t.Fatalf("second login: %v", err)
+	}
+	if got := c.Mode(); got != "ap" {
+		t.Fatalf("Mode() = %q after the second login, want %q: Mode follows the latest Login, "+
+			"not the first", got, "ap")
+	}
+	if err := c.Logout(ctx); err != nil {
+		t.Fatalf("second logout: %v", err)
+	}
+
+	f.mode = noMode
+	if err := c.Login(ctx); err != nil {
+		t.Fatalf("third login: %v", err)
+	}
+	if got := c.Mode(); got != "" {
+		t.Fatalf("Mode() = %q after a third login whose keys reply names no mode, want it empty: "+
+			"a mode kept from an earlier login is stale", got)
+	}
+}
+
+// The keys reply carries both the password key and the mode.
+func TestLoginFetchesTheKeysOnce(t *testing.T) {
+	srv, f := newFakeRouter(t, []string{CertSGL1S2})
+	c, err := New(srv.URL, f.username, f.password, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+
+	if err := c.Login(ctx); err != nil {
+		t.Fatalf("first login: %v", err)
+	}
+	if got := f.keysRequests.Load(); got != 1 {
+		t.Errorf("%d requests to login?form=keys after one Login, want 1: the one reply carries the password "+
+			"key and the mode", got)
+	}
+	if err := c.Logout(ctx); err != nil {
+		t.Fatalf("logout: %v", err)
+	}
+
+	if err := c.Login(ctx); err != nil {
+		t.Fatalf("second login: %v", err)
+	}
+	if got := f.keysRequests.Load(); got != 2 {
+		t.Errorf("%d requests to login?form=keys after a Logout and a second Login, want 2: every Login "+
+			"fetches the keys once, and the mode with them", got)
 	}
 }

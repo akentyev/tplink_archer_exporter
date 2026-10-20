@@ -9,7 +9,7 @@
     "connect_status": 1,
     "access_uptime": 801125,
     "name": "laptop",
-    "connect_device_id": "80005C55703ADF38F472366AFF1A815F242F9EC2",
+    "connect_device_id": "467345895992F440CC845294D32EC4E4FDFD9795",
     "guest": "NON_GUEST",
     "device_type": "Computer"
   },
@@ -23,7 +23,7 @@
     "connect_status": 1,
     "access_uptime": 763265,
     "name": "sensor",
-    "connect_device_id": "80005C55703ADF38F472366AFF1A815F242F9EC2",
+    "connect_device_id": "467345895992F440CC845294D32EC4E4FDFD9795",
     "guest": "NON_GUEST",
     "device_type": "Tablet"
   },
@@ -37,7 +37,7 @@
     "connect_status": 1,
     "access_uptime": 1072911,
     "name": "router-2",
-    "connect_device_id": "80005C55703ADF38F472366AFF1A815F242F9EC2",
+    "connect_device_id": "467345895992F440CC845294D32EC4E4FDFD9795",
     "guest": "NON_GUEST",
     "device_type": "unknown"
   },
@@ -51,7 +51,7 @@
     "connect_status": 1,
     "access_uptime": 926599,
     "name": "nas",
-    "connect_device_id": "80005C55703ADF38F472366AFF1A815F242F9EC2",
+    "connect_device_id": "467345895992F440CC845294D32EC4E4FDFD9795",
     "guest": "NON_GUEST",
     "device_type": "Computer"
   },
@@ -65,7 +65,7 @@
     "connect_status": 1,
     "access_uptime": 1093365,
     "name": "printer",
-    "connect_device_id": "80005C55703ADF38F472366AFF1A815F242F9EC2",
+    "connect_device_id": "467345895992F440CC845294D32EC4E4FDFD9795",
     "guest": "NON_GUEST",
     "device_type": "Computer"
   },
@@ -79,7 +79,7 @@
     "connect_status": 1,
     "access_uptime": 597170,
     "name": "thermostat",
-    "connect_device_id": "80005C55703ADF38F472366AFF1A815F242F9EC2",
+    "connect_device_id": "467345895992F440CC845294D32EC4E4FDFD9795",
     "guest": "NON_GUEST",
     "device_type": "Computer"
   },
@@ -93,7 +93,7 @@
     "connect_status": 1,
     "access_uptime": 774321,
     "name": "laptop",
-    "connect_device_id": "80005C55703ADF38F472366AFF1A815F242F9EC2",
+    "connect_device_id": "467345895992F440CC845294D32EC4E4FDFD9795",
     "guest": "NON_GUEST",
     "device_type": "Computer"
   },
@@ -107,7 +107,7 @@
     "connect_status": 1,
     "access_uptime": 1095957,
     "name": "watch",
-    "connect_device_id": "80005C55703ADF38F472366AFF1A815F242F9EC2",
+    "connect_device_id": "467345895992F440CC845294D32EC4E4FDFD9795",
     "guest": "NON_GUEST",
     "device_type": "unknown"
   },
@@ -121,7 +121,7 @@
     "connect_status": 1,
     "access_uptime": 599802,
     "name": "bulb-b",
-    "connect_device_id": "80005C55703ADF38F472366AFF1A815F242F9EC2",
+    "connect_device_id": "467345895992F440CC845294D32EC4E4FDFD9795",
     "guest": "NON_GUEST",
     "device_type": "IoT Devices"
   },
@@ -135,7 +135,7 @@
     "connect_status": 1,
     "access_uptime": 1034384,
     "name": "console",
-    "connect_device_id": "80005C55703ADF38F472366AFF1A815F242F9EC2",
+    "connect_device_id": "467345895992F440CC845294D32EC4E4FDFD9795",
     "guest": "NON_GUEST",
     "device_type": "Computer"
   },
@@ -149,7 +149,7 @@
     "connect_status": 1,
     "access_uptime": 988532,
     "name": "speaker",
-    "connect_device_id": "80005C55703ADF38F472366AFF1A815F242F9EC2",
+    "connect_device_id": "467345895992F440CC845294D32EC4E4FDFD9795",
     "guest": "NON_GUEST",
     "device_type": "Computer"
   },
@@ -163,7 +163,7 @@
     "connect_status": 1,
     "access_uptime": 764155,
     "name": "tv",
-    "connect_device_id": "80005C55703ADF38F472366AFF1A815F242F9EC2",
+    "connect_device_id": "467345895992F440CC845294D32EC4E4FDFD9795",
     "guest": "NON_GUEST",
     "device_type": "Computer"
   },
@@ -177,7 +177,7 @@
     "connect_status": 1,
     "access_uptime": 1086481,
     "name": "plug",
-    "connect_device_id": "80005C55703ADF38F472366AFF1A815F242F9EC2",
+    "connect_device_id": "467345895992F440CC845294D32EC4E4FDFD9795",
     "guest": "NON_GUEST",
     "device_type": "Mobile"
   },
@@ -191,7 +191,7 @@
     "connect_status": 1,
     "access_uptime": 830375,
     "name": "phone",
-    "connect_device_id": "80005C55703ADF38F472366AFF1A815F242F9EC2",
+    "connect_device_id": "467345895992F440CC845294D32EC4E4FDFD9795",
     "guest": "NON_GUEST",
     "device_type": "Mobile"
   },
@@ -205,7 +205,7 @@
     "connect_status": 1,
     "access_uptime": 607097,
     "name": "camera",
-    "connect_device_id": "80005C55703ADF38F472366AFF1A815F242F9EC2",
+    "connect_device_id": "467345895992F440CC845294D32EC4E4FDFD9795",
     "guest": "NON_GUEST",
     "device_type": "IoT Devices"
   },
@@ -219,7 +219,7 @@
     "connect_status": 1,
     "access_uptime": 1048124,
     "name": "bulb-a",
-    "connect_device_id": "80005C55703ADF38F472366AFF1A815F242F9EC2",
+    "connect_device_id": "467345895992F440CC845294D32EC4E4FDFD9795",
     "guest": "NON_GUEST",
     "device_type": "Computer"
   },
@@ -233,7 +233,7 @@
     "connect_status": 1,
     "access_uptime": 1090003,
     "name": "speaker",
-    "connect_device_id": "80005C55703ADF38F472366AFF1A815F242F9EC2",
+    "connect_device_id": "467345895992F440CC845294D32EC4E4FDFD9795",
     "guest": "NON_GUEST",
     "device_type": "IoT Devices"
   },
@@ -247,7 +247,7 @@
     "connect_status": 1,
     "access_uptime": 1108084,
     "name": "hub",
-    "connect_device_id": "80005C55703ADF38F472366AFF1A815F242F9EC2",
+    "connect_device_id": "467345895992F440CC845294D32EC4E4FDFD9795",
     "guest": "NON_GUEST",
     "device_type": "Computer"
   }

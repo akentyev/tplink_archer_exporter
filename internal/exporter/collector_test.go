@@ -67,6 +67,7 @@ func fullSnapshot() *Snapshot {
 	noMappings := 0
 	return &Snapshot{
 		TakenAt: takenAt,
+		Mode:    "router",
 
 		Firmware: &Firmware{
 			Version:  "1.4.1 Build 20251117 rel.76722(5255)",
@@ -123,6 +124,10 @@ func fullSnapshot() *Snapshot {
 				ConnectedAt: time.Unix(1786782846, 0),
 				Via:         "00:00:5e:00:53:15",
 			},
+		},
+		// The speaker is the one wireless client above.
+		ClientRadio: map[string]ClientRadio{
+			"00:00:5e:00:53:0f": wantRadio(-70, 72, 52),
 		},
 
 		// One lease counting down and one permanent; the reserved addresses are
@@ -255,6 +260,14 @@ var wanMetrics = []string{
 	"tplink_wan_speed_bytes", "tplink_wan_speed_timestamp_seconds",
 }
 
+const modeMetric = "tplink_operation_mode_info"
+
+const modeGolden = `
+# HELP tplink_operation_mode_info The operation mode the router named at login, lowercased; the firmware knows router, ap, repeater, client and multissid. The value is always 1.
+# TYPE tplink_operation_mode_info gauge
+tplink_operation_mode_info{mode="router"} 1
+`
+
 // The router clock is a stamp rather than a difference; a difference would
 // measure the container's timezone along with the drift.
 const performanceGolden = `
@@ -355,6 +368,19 @@ tplink_clients{iface="2.4G"} 1
 tplink_clients{iface="wired"} 1
 `
 
+// The speaker's reading; the wired thermostat has none.
+const clientRadioGolden = `
+# HELP tplink_client_rx_rate_mbits The firmware's rxrate in Mbit/s, which the web UI shows under Tx/Rx Rate: a theoretical link maximum, not throughput. Whose receive it is, the router's or the client's, is not established.
+# TYPE tplink_client_rx_rate_mbits gauge
+tplink_client_rx_rate_mbits{mac="00:00:5e:00:53:0f"} 52
+# HELP tplink_client_signal_dbm Signal level the router reports for a wireless client; the values read as dBm, and the web UI does not show the field.
+# TYPE tplink_client_signal_dbm gauge
+tplink_client_signal_dbm{mac="00:00:5e:00:53:0f"} -70
+# HELP tplink_client_tx_rate_mbits The firmware's txrate in Mbit/s, which the web UI shows under Tx/Rx Rate: a theoretical link maximum, not throughput. Whose transmit it is, the router's or the client's, is not established.
+# TYPE tplink_client_tx_rate_mbits gauge
+tplink_client_tx_rate_mbits{mac="00:00:5e:00:53:0f"} 72
+`
+
 // Expiry is TakenAt plus what is left: 1786802858 + 5534.
 const dhcpGolden = `
 # HELP tplink_dhcp_lease_expiry_seconds Unix time the lease runs out. Absent for a permanent lease: a far-future stand-in would break sorting by soonest.
@@ -374,7 +400,7 @@ tplink_dhcp_reservation{hostname="laptop",ip="192.0.2.2",mac="00:00:5e:00:53:01"
 `
 
 const vpnGolden = `
-# HELP tplink_vpn_server_enabled 1 when the router's own VPN server is on.
+# HELP tplink_vpn_server_enabled 1 when the VPN client is switched on. The web UI keeps this switch, vpn?form=enable, on its VPN Client page; the "server" in the name is a misreading kept for compatibility.
 # TYPE tplink_vpn_server_enabled gauge
 tplink_vpn_server_enabled 1
 # HELP tplink_vpn_tunnel_info One series per outbound VPN tunnel of the router.
@@ -387,7 +413,7 @@ tplink_vpn_tunnel_speed_bytes{dir="tx",name="NordVPN"} 1147
 # HELP tplink_vpn_tunnel_up 1 when the tunnel is connected.
 # TYPE tplink_vpn_tunnel_up gauge
 tplink_vpn_tunnel_up{name="NordVPN"} 1
-# HELP tplink_vpn_user_access 1 when the user may use the VPN server. Permission, not an active session — the firmware does not report who is connected.
+# HELP tplink_vpn_user_access The access flag of a device in the VPN client's device list, vpn?form=vpn_user_list, which the web UI keeps on its VPN Client page. A setting, not an active session — the firmware does not report who is connected.
 # TYPE tplink_vpn_user_access gauge
 tplink_vpn_user_access{client_type="pc",mac="00:00:5e:00:53:0a",name="thermostat"} 1
 tplink_vpn_user_access{client_type="pc",mac="00:00:5e:00:53:0b",name="bulb-a"} 0
@@ -456,11 +482,13 @@ func metricGroups() []metricGroup {
 		{"build", buildInfoGolden(testBuild.Version, testBuild.Revision)},
 		{"health", healthGolden},
 		{"router", routerGolden},
+		{"mode", modeGolden},
 		{"performance", performanceGolden},
 		{"ports", portsGolden},
 		{"wifi", wifiGolden},
 		{"mesh", meshGolden},
 		{"clients", clientsGolden},
+		{"client radio", clientRadioGolden},
 		{"dhcp", dhcpGolden},
 		{"vpn", vpnGolden},
 		{"security", securityGolden},
@@ -1401,6 +1429,9 @@ func TestClientMetricsCarryMACAlone(t *testing.T) {
 		{"tplink_client_session_seconds", []string{"mac"}},
 		{"tplink_client_connected_since_seconds", []string{"mac"}},
 		{"tplink_clients", []string{"iface"}},
+		{"tplink_client_signal_dbm", []string{"mac"}},
+		{"tplink_client_tx_rate_mbits", []string{"mac"}},
+		{"tplink_client_rx_rate_mbits", []string{"mac"}},
 	} {
 		d, ok := described[tc.metric]
 		if !ok {
@@ -1414,8 +1445,9 @@ func TestClientMetricsCarryMACAlone(t *testing.T) {
 	}
 }
 
-// The firmware reports who may use the VPN server, never who is on it.
-func TestVPNUserAccessIsPermissionNotASession(t *testing.T) {
+// The VPN client's device list holds a setting per device; the firmware never
+// reports who is connected.
+func TestVPNUserAccessIsASettingNotASession(t *testing.T) {
 	described := describedMetrics(t)
 
 	if _, ok := described["tplink_vpn_user_access"]; !ok {
@@ -1427,8 +1459,8 @@ func TestVPNUserAccessIsPermissionNotASession(t *testing.T) {
 			t.Errorf("%s reads as an active session; the firmware does not report who is connected", name)
 		}
 	}
-	if help := described["tplink_vpn_user_access"].help; !strings.Contains(help, "Permission, not an active session") {
-		t.Errorf("tplink_vpn_user_access is documented as %q; it has to say that it is permission and "+
+	if help := described["tplink_vpn_user_access"].help; !strings.Contains(help, "A setting, not an active session") {
+		t.Errorf("tplink_vpn_user_access is documented as %q; it has to say that it is a setting and "+
 			"not a session, or a dashboard will read it as one", help)
 	}
 }
@@ -1475,5 +1507,256 @@ func TestExpositionPassesTheLinter(t *testing.T) {
 	}
 	for _, p := range problems {
 		t.Errorf("%s: %s", p.Metric, p.Text)
+	}
+}
+
+func modeSeries(t *testing.T, mode string) string {
+	t.Helper()
+	return expositionFor(t, modeGolden, fmt.Sprintf(`%s{mode=%q} 1`, modeMetric, mode))
+}
+
+func groupsHold(t *testing.T, g prometheus.Gatherer, skip ...string) {
+	t.Helper()
+	for _, grp := range metricGroups() {
+		if slices.Contains(skip, grp.name) {
+			continue
+		}
+		names := goldenNames(t, grp.want)
+		if err := testutil.GatherAndCompare(g, strings.NewReader(grp.want), names...); err != nil {
+			t.Errorf("the %s metrics differ from their golden:\n%v", grp.name, err)
+		}
+	}
+}
+
+func seriesHold(t *testing.T, g prometheus.Gatherer, want int) {
+	t.Helper()
+	got, err := testutil.GatherAndCount(g)
+	if err != nil {
+		t.Fatalf("gathering failed: %v", err)
+	}
+	if got != want {
+		t.Errorf("a scrape carried %d series, want %d", got, want)
+	}
+}
+
+func TestUnnamedModePublishesNoModeSeries(t *testing.T) {
+	st := fullState()
+	st.Snapshot.Mode = ""
+	g := gathererFor(t, st)
+
+	if err := testutil.GatherAndCompare(g, strings.NewReader(""), modeMetric); err != nil {
+		t.Errorf("%s has a series for a snapshot whose mode is empty:\n%v", modeMetric, err)
+	}
+	groupsHold(t, g, "mode")
+	seriesHold(t, g, goldensSeries()-goldenSeries(modeGolden))
+}
+
+// ap_clients.json carries 0 for trafficUsage, downloadSpeed and uploadSpeed on
+// every row.
+func TestAccessPointPublishesNoClientTraffic(t *testing.T) {
+	st := fullState()
+	st.Snapshot.Mode = "ap"
+	g := gathererFor(t, st)
+
+	gone := []string{"tplink_client_traffic_bytes_total", "tplink_client_speed_bytes"}
+	if err := testutil.GatherAndCompare(g, strings.NewReader(""), gone...); err != nil {
+		t.Errorf("an access point's scrape carries client traffic or speed:\n%v", err)
+	}
+
+	kept := []string{
+		"tplink_client_info", "tplink_client_session_seconds",
+		"tplink_client_connected_since_seconds", "tplink_clients",
+	}
+	var want strings.Builder
+	for _, name := range kept {
+		want.WriteString(goldenFamily(t, clientsGolden, name))
+	}
+	if err := testutil.GatherAndCompare(g, strings.NewReader(want.String()), kept...); err != nil {
+		t.Errorf("the client list, the sessions or the counts changed on an access point; "+
+			"only traffic and speed go:\n%v", err)
+	}
+
+	if err := testutil.GatherAndCompare(g, strings.NewReader(modeSeries(t, "ap")), modeMetric); err != nil {
+		t.Errorf("an access point's mode series is not %s{mode=\"ap\"} 1:\n%v", modeMetric, err)
+	}
+
+	const link = `tplink_wan_status{iface="link"} 1` + "\n"
+	router := strings.Replace(routerGolden, link, "", 1)
+	if router == routerGolden {
+		t.Fatalf("routerGolden holds no %q to leave out", link)
+	}
+	if err := testutil.GatherAndCompare(g, strings.NewReader(router), goldenNames(t, routerGolden)...); err != nil {
+		t.Errorf("an access point's router metrics differ from their golden by more than the WAN link "+
+			"series:\n%v", err)
+	}
+
+	groupsHold(t, g, "clients", "mode", "router")
+	remaining := goldensSeries() - goldenSeries(link)
+	for _, name := range gone {
+		remaining -= goldenSeries(goldenFamily(t, clientsGolden, name))
+	}
+	seriesHold(t, g, remaining)
+}
+
+func TestOnlyAnAccessPointDropsClientTraffic(t *testing.T) {
+	for _, tc := range []struct{ name, mode string }{
+		{"a repeater", "repeater"},
+		{"a client", "client"},
+		{"multiple SSIDs", "multissid"},
+		{"a name the HELP does not list", "no-such-mode"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := fullState()
+			st.Snapshot.Mode = tc.mode
+			g := gathererFor(t, st)
+
+			err := testutil.GatherAndCompare(g, strings.NewReader(modeSeries(t, tc.mode)), modeMetric)
+			if err != nil {
+				t.Errorf("%s: the mode series is the name the router gave, with value 1:\n%v", tc.name, err)
+			}
+			groupsHold(t, g, "mode")
+			seriesHold(t, g, goldensSeries())
+		})
+	}
+}
+
+// An access point's wan_internet_status reads "unplugged" with the WAN port up.
+func TestAccessPointPublishesNoWANLink(t *testing.T) {
+	families := []string{"tplink_wan_status", "tplink_wan_status_info"}
+	both := goldenFamily(t, routerGolden, "tplink_wan_status") +
+		goldenFamily(t, routerGolden, "tplink_wan_status_info")
+	internetUp := expositionFor(t, routerGolden,
+		`tplink_wan_status{iface="internet"} 1`,
+		`tplink_wan_status_info{state="connected"} 1`)
+	internetDown := expositionFor(t, routerGolden,
+		`tplink_wan_status{iface="internet"} 0`,
+		`tplink_wan_status_info{state="disconnected"} 1`)
+
+	for _, tc := range []struct {
+		name, mode string
+		wan        *WAN // nil keeps the WAN of fullSnapshot, LinkUp true
+		want       string
+	}{
+		{"an access point", "ap", nil, internetUp},
+		{"an access point as ap_status_internet.json reads", "ap",
+			&WAN{HaveStatus: true, InternetUp: true, State: "connected"}, internetUp},
+		{"an access point with the internet down", "ap",
+			&WAN{HaveStatus: true, State: "disconnected"}, internetDown},
+		{"no mode named", "", nil, both},
+		{"a router", "router", nil, both},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := fullState()
+			st.Snapshot.Mode = tc.mode
+			if tc.wan != nil {
+				st.Snapshot.WAN = tc.wan
+			}
+
+			err := testutil.GatherAndCompare(gathererFor(t, st), strings.NewReader(tc.want), families...)
+			if err != nil {
+				t.Errorf("mode %q: an access point publishes tplink_wan_status{iface=\"internet\"} and the raw "+
+					"state without iface=\"link\"; every other mode publishes both ifaces:\n%v", tc.mode, err)
+			}
+		})
+	}
+}
+
+// The mode comes from the login, not from an endpoint.
+func TestModeIsPublishedFromAnOtherwiseEmptySnapshot(t *testing.T) {
+	st := State{
+		Snapshot:       &Snapshot{TakenAt: takenAt, Mode: "ap"},
+		Up:             true,
+		EndpointErrors: map[string]uint64{},
+	}
+
+	err := testutil.GatherAndCompare(gathererFor(t, st), strings.NewReader(modeSeries(t, "ap")), modeMetric)
+	if err != nil {
+		t.Errorf("a snapshot with a mode and no section does not name the mode:\n%v", err)
+	}
+}
+
+func TestClientRadioPublishesOnlyWhatWasRead(t *testing.T) {
+	sensor := Client{
+		MAC: "00:00:5e:00:53:12", IP: "192.0.2.19", Hostname: "sensor",
+		Iface: "2.4G", Type: "Tablet",
+	}
+	for _, tc := range []struct {
+		name    string
+		clients []Client // nil keeps the clients of fullSnapshot
+		radio   map[string]ClientRadio
+		want    []string
+	}{
+		{
+			name: "a signal alone, and a full reading for a MAC that is not a client",
+			radio: map[string]ClientRadio{
+				"00:00:5e:00:53:0f": {SignalDBm: wantFloat(-70)},
+				"00:00:5e:00:53:99": wantRadio(-61, 72, 65),
+			},
+			want: []string{`tplink_client_signal_dbm{mac="00:00:5e:00:53:0f"} -70`},
+		},
+		{
+			name:  "a tx rate alone",
+			radio: map[string]ClientRadio{"00:00:5e:00:53:0f": {TxMbits: wantFloat(72)}},
+			want:  []string{`tplink_client_tx_rate_mbits{mac="00:00:5e:00:53:0f"} 72`},
+		},
+		{
+			name:  "an rx rate alone",
+			radio: map[string]ClientRadio{"00:00:5e:00:53:0f": {RxMbits: wantFloat(52)}},
+			want:  []string{`tplink_client_rx_rate_mbits{mac="00:00:5e:00:53:0f"} 52`},
+		},
+		{
+			name:  "an entry that holds no reading",
+			radio: map[string]ClientRadio{"00:00:5e:00:53:0f": {}},
+		},
+		{
+			name:  "a full reading for a MAC that is not a client",
+			radio: map[string]ClientRadio{"00:00:5e:00:53:99": wantRadio(-61, 72, 65)},
+		},
+		{
+			name: "no entries at all",
+		},
+		{
+			name:    "two wireless clients, each with its own reading",
+			clients: append(fullSnapshot().Clients, sensor),
+			radio: map[string]ClientRadio{
+				"00:00:5e:00:53:0f": wantRadio(-70, 72, 52),
+				"00:00:5e:00:53:12": wantRadio(-65, 100, 6),
+			},
+			want: []string{
+				`tplink_client_signal_dbm{mac="00:00:5e:00:53:0f"} -70`,
+				`tplink_client_signal_dbm{mac="00:00:5e:00:53:12"} -65`,
+				`tplink_client_tx_rate_mbits{mac="00:00:5e:00:53:0f"} 72`,
+				`tplink_client_tx_rate_mbits{mac="00:00:5e:00:53:12"} 100`,
+				`tplink_client_rx_rate_mbits{mac="00:00:5e:00:53:0f"} 52`,
+				`tplink_client_rx_rate_mbits{mac="00:00:5e:00:53:12"} 6`,
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := fullState()
+			if tc.clients != nil {
+				st.Snapshot.Clients = tc.clients
+			}
+			st.Snapshot.ClientRadio = tc.radio
+
+			want := expositionFor(t, clientRadioGolden, tc.want...)
+			err := testutil.GatherAndCompare(gathererFor(t, st), strings.NewReader(want),
+				goldenNames(t, clientRadioGolden)...)
+			if err != nil {
+				t.Errorf("%s: a reading that was not read has no series:\n%v", tc.name, err)
+			}
+		})
+	}
+}
+
+// ap_clients.json carries signal, txrate and rxrate on every row.
+func TestAccessPointPublishesClientRadio(t *testing.T) {
+	st := fullState()
+	st.Snapshot.Mode = "ap"
+
+	err := testutil.GatherAndCompare(gathererFor(t, st), strings.NewReader(clientRadioGolden),
+		goldenNames(t, clientRadioGolden)...)
+	if err != nil {
+		t.Errorf("an access point's client radio series differ from their golden:\n%v", err)
 	}
 }
