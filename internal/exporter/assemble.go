@@ -40,8 +40,12 @@ const (
 	srcMesh        = "admin/easymesh_network?form=get_mesh_device_list_all"
 )
 
-// sources is the poll set: 23 requests per cycle, which must fit inside
-// Interval with room to spare.
+// modeAP is the operation mode of an access point, spelled as tpapi.Client.Mode
+// reports it.
+const modeAP = "ap"
+
+// sources is the poll set of every mode but modeAP: 23 requests per cycle,
+// which must fit inside Interval with room to spare.
 var sources = []source{
 	{srcClients, "loadDevice"},
 	{srcClientTimes, "read"},
@@ -68,16 +72,43 @@ var sources = []source{
 	{srcMesh, "read"},
 }
 
+// apSources is the poll set under modeAP, in the order sources polls them.
+// status?form=internet is polled: the access point's own Network Map reads it.
+// status?form=wan_speed is not: it reads zeros. Nor is what has no section in
+// the access point's menu or fails there (vpn?form=enable, imb?form=arp_list).
+var apSources = []source{
+	{srcClients, "loadDevice"},
+	{srcClientTimes, "read"},
+	{srcLeases, "load"},
+	{srcReservation, "load"},
+	{srcDHCP, "read"},
+	{srcStatusAll, "read"},
+	{srcPorts, "read"},
+	{srcInternet, "read"},
+	{srcFirmware, "read"},
+	{srcClock, "read"},
+	{srcMesh, "read"},
+}
+
+func sourcesFor(mode string) []source {
+	if mode == modeAP {
+		return apSources
+	}
+	return sources
+}
+
 // securitySources are the replies parseSecurity folds together.
 var securitySources = []string{
 	srcRemote, srcUPnPEnable, srcUPnPService, srcNATvs, srcNATpt, srcDMZ, srcFirewall,
 }
 
 // assemble turns the replies into one Snapshot. A parser that fails is recorded
-// against its endpoint like a failed request; Errors has one slot per path and
-// status?form=all feeds four parsers, so the first failure over a reply wins.
+// against its endpoint like a failed request; Errors has one slot per path, and
+// status?form=all and game_accelerator each feed more than one parser, so the
+// first failure over a reply wins.
 func assemble(snap *Snapshot, replies map[string]json.RawMessage) {
 	fill(snap, replies, srcClients, parseClients, func(v []Client) { snap.Clients = v })
+	fill(snap, replies, srcClients, parseClientRadio, func(v map[string]ClientRadio) { snap.ClientRadio = v })
 	fill(snap, replies, srcClientTimes, parseClientTimes, func(v map[string]ClientTimes) {
 		snap.Clients = mergeClientTimes(snap.Clients, v)
 	})
@@ -103,7 +134,8 @@ func assemble(snap *Snapshot, replies map[string]json.RawMessage) {
 // own fields.
 func assembleWAN(snap *Snapshot, replies map[string]json.RawMessage) {
 	wan := &WAN{}
-	if raw, ok := replies[srcStatusAll]; ok {
+	// An access point's status?form=all has no wan_ipv4_* family.
+	if raw, ok := replies[srcStatusAll]; ok && snap.Mode != modeAP {
 		uptime, err := parseWANUptime(raw)
 		if err != nil {
 			snapError(snap, srcStatusAll, err)

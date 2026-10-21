@@ -26,6 +26,7 @@ var (
 	descSnapshotTime     = prometheus.NewDesc("tplink_snapshot_timestamp_seconds", "Unix time of the snapshot being served; its age is time() minus this.", nil, nil)
 	descFailedSources    = prometheus.NewDesc("tplink_endpoints_failed", "Endpoints that did not answer in the cycle behind the snapshot being served.", nil, nil)
 
+	descOperationMode = prometheus.NewDesc("tplink_operation_mode_info", "The operation mode the router named at login, lowercased; the firmware knows router, ap, repeater, client and multissid. The value is always 1.", []string{"mode"}, nil)
 	descFirmware      = prometheus.NewDesc("tplink_firmware_info", "Firmware the router reports about itself.", []string{"version", "hardware", "model"}, nil)
 	descWANUptime     = prometheus.NewDesc("tplink_wan_uptime_seconds", "Seconds the WAN link has been up; resets on reconnect.", nil, nil)
 	descWANStatus     = prometheus.NewDesc("tplink_wan_status", "1 when connected. iface=\"internet\" is reachability, iface=\"link\" the physical WAN port.", []string{"iface"}, nil)
@@ -56,6 +57,10 @@ var (
 	descClientSince    = prometheus.NewDesc("tplink_client_connected_since_seconds", "Unix time the current session began.", []string{"mac"}, nil)
 	descClientsByIface = prometheus.NewDesc("tplink_clients", "Clients currently online, by connection type.", []string{"iface"}, nil)
 
+	descClientSignal = prometheus.NewDesc("tplink_client_signal_dbm", "Signal level the router reports for a wireless client; the values read as dBm, and the web UI does not show the field.", []string{"mac"}, nil)
+	descClientTxRate = prometheus.NewDesc("tplink_client_tx_rate_mbits", "The firmware's txrate in Mbit/s, which the web UI shows under Tx/Rx Rate: a theoretical link maximum, not throughput. Whose transmit it is, the router's or the client's, is not established.", []string{"mac"}, nil)
+	descClientRxRate = prometheus.NewDesc("tplink_client_rx_rate_mbits", "The firmware's rxrate in Mbit/s, which the web UI shows under Tx/Rx Rate: a theoretical link maximum, not throughput. Whose receive it is, the router's or the client's, is not established.", []string{"mac"}, nil)
+
 	descLeaseExpiry    = prometheus.NewDesc("tplink_dhcp_lease_expiry_seconds", "Unix time the lease runs out. Absent for a permanent lease: a far-future stand-in would break sorting by soonest.", []string{"mac", "ip", "hostname"}, nil)
 	descLeasePermanent = prometheus.NewDesc("tplink_dhcp_lease_permanent", "1 when the lease never expires. Not the same as being reserved.", []string{"mac", "ip", "hostname"}, nil)
 	descReservation    = prometheus.NewDesc("tplink_dhcp_reservation", "1 when the address is reserved for this MAC.", []string{"mac", "ip", "hostname"}, nil)
@@ -64,8 +69,8 @@ var (
 	descTunnelInfo    = prometheus.NewDesc("tplink_vpn_tunnel_info", "One series per outbound VPN tunnel of the router.", []string{"name", "vendor", "type", "endpoint"}, nil)
 	descTunnelUp      = prometheus.NewDesc("tplink_vpn_tunnel_up", "1 when the tunnel is connected.", []string{"name"}, nil)
 	descTunnelSpeed   = prometheus.NewDesc("tplink_vpn_tunnel_speed_bytes", "Current tunnel throughput in bytes per second; the firmware keeps no byte counter.", []string{"name", "dir"}, nil)
-	descVPNServer     = prometheus.NewDesc("tplink_vpn_server_enabled", "1 when the router's own VPN server is on.", nil, nil)
-	descVPNUserAccess = prometheus.NewDesc("tplink_vpn_user_access", "1 when the user may use the VPN server. Permission, not an active session — the firmware does not report who is connected.", []string{"mac", "name", "client_type"}, nil)
+	descVPNServer     = prometheus.NewDesc("tplink_vpn_server_enabled", "1 when the VPN client is switched on. The web UI keeps this switch, vpn?form=enable, on its VPN Client page; the \"server\" in the name is a misreading kept for compatibility.", nil, nil)
+	descVPNUserAccess = prometheus.NewDesc("tplink_vpn_user_access", "The access flag of a device in the VPN client's device list, vpn?form=vpn_user_list, which the web UI keeps on its VPN Client page. A setting, not an active session — the firmware does not report who is connected.", []string{"mac", "name", "client_type"}, nil)
 
 	descRemoteMgmt   = prometheus.NewDesc("tplink_remote_management_enabled", "1 when the router accepts management from the WAN side.", nil, nil)
 	descUPnPEnabled  = prometheus.NewDesc("tplink_upnp_enabled", "1 when UPnP is on.", nil, nil)
@@ -88,12 +93,14 @@ var descriptors = []*prometheus.Desc{
 	descBuildInfo, descUp, descSessionBlocked, descScrapeDuration, descScrapeErrors,
 	descLogins, descLoginFailures, descSessionsLost, descLoginsSuppressed,
 	descSnapshotTime, descFailedSources,
+	descOperationMode,
 	descFirmware, descWANUptime, descWANStatus, descWANStatusInfo, descWANSpeed, descWANSpeedAt,
 	descCPU, descCPUCore, descCPUCores, descMemory, descRouterClock, descRouterClockInfo,
 	descPortLink, descPortSpeed, descPortInfo,
 	descWiFiRadio, descWiFiChannel, descWiFiTxPower,
 	descClientInfo, descClientTraffic, descClientSpeed, descClientSession,
 	descClientSince, descClientsByIface,
+	descClientSignal, descClientTxRate, descClientRxRate,
 	descLeaseExpiry, descLeasePermanent, descReservation, descPoolLease,
 	descTunnelInfo, descTunnelUp, descTunnelSpeed, descVPNServer, descVPNUserAccess,
 	descRemoteMgmt, descUPnPEnabled, descUPnPMappings, descPortForwards, descDMZ,
@@ -182,6 +189,10 @@ func collectHealth(ch chan<- prometheus.Metric, st State, b BuildInfo) {
 }
 
 func collectRouter(ch chan<- prometheus.Metric, snap *Snapshot) {
+	// The mode comes from the login, not from an endpoint.
+	if snap.Mode != "" {
+		gauge(ch, descOperationMode, 1, snap.Mode)
+	}
 	if f := snap.Firmware; f != nil {
 		gauge(ch, descFirmware, 1, f.Version, f.Hardware, f.Model)
 	}
@@ -191,7 +202,11 @@ func collectRouter(ch chan<- prometheus.Metric, snap *Snapshot) {
 		}
 		if w.HaveStatus {
 			gauge(ch, descWANStatus, b2f(w.InternetUp), "internet")
-			gauge(ch, descWANStatus, b2f(w.LinkUp), "link")
+			// On an access point wan_internet_status reads unplugged while the
+			// WAN port is up.
+			if snap.Mode != modeAP {
+				gauge(ch, descWANStatus, b2f(w.LinkUp), "link")
+			}
 			if w.State != "" {
 				gauge(ch, descWANStatusInfo, 1, w.State)
 			}
@@ -236,20 +251,30 @@ func collectRouter(ch chan<- prometheus.Metric, snap *Snapshot) {
 }
 
 func collectClients(ch chan<- prometheus.Metric, snap *Snapshot) {
+	// On an access point trafficUsage, downloadSpeed and uploadSpeed read 0 for
+	// every client (ap_clients.json).
+	withTraffic := snap.Mode != modeAP
 	byIface := map[string]int{}
 	for _, c := range snap.Clients {
 		byIface[c.Iface]++
 		gauge(ch, descClientInfo, 1, c.MAC, c.IP, c.Hostname, c.Iface, c.Type,
 			strconv.FormatBool(c.Guest), c.Via)
-		counter(ch, descClientTraffic, float64(c.TrafficBytes), c.MAC)
-		gauge(ch, descClientSpeed, c.DownBytesPerS, c.MAC, "rx")
-		gauge(ch, descClientSpeed, c.UpBytesPerS, c.MAC, "tx")
+		if withTraffic {
+			counter(ch, descClientTraffic, float64(c.TrafficBytes), c.MAC)
+			gauge(ch, descClientSpeed, c.DownBytesPerS, c.MAC, "rx")
+			gauge(ch, descClientSpeed, c.UpBytesPerS, c.MAC, "tx")
+		}
 		gauge(ch, descClientSession, c.Session.Seconds(), c.MAC)
 		// A client the other endpoint has not reported yet keeps a zero time,
 		// and zero is not a stamp.
 		if !c.ConnectedAt.IsZero() {
 			gauge(ch, descClientSince, float64(c.ConnectedAt.Unix()), c.MAC)
 		}
+		// Published in every mode: ap_clients.json carries all three keys.
+		r := snap.ClientRadio[c.MAC]
+		reading(ch, descClientSignal, r.SignalDBm, c.MAC)
+		reading(ch, descClientTxRate, r.TxMbits, c.MAC)
+		reading(ch, descClientRxRate, r.RxMbits, c.MAC)
 	}
 	for iface, n := range byIface {
 		gauge(ch, descClientsByIface, float64(n), iface)
@@ -317,6 +342,12 @@ func collectSecurity(ch chan<- prometheus.Metric, snap *Snapshot) {
 func flag(ch chan<- prometheus.Metric, d *prometheus.Desc, v *bool, labels ...string) {
 	if v != nil {
 		gauge(ch, d, b2f(*v), labels...)
+	}
+}
+
+func reading(ch chan<- prometheus.Metric, d *prometheus.Desc, v *float64, labels ...string) {
+	if v != nil {
+		gauge(ch, d, *v, labels...)
 	}
 }
 

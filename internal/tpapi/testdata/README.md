@@ -1,12 +1,22 @@
 # Fixtures
 
 Real replies from an Archer AX80 (firmware 1.4.1 Build 20251117), captured with
-`cmd/recon`, then anonymised: MAC addresses were remapped into IANA's documentation OUI `00-00-5E-00-53-xx`, addresses
-into TEST-NET-1 `192.0.2.0/24`, and host names, SSIDs and VPN endpoints replaced with stand-ins. The mapping is
-one-to-one, so joins across files still work — the same device is the same MAC in every fixture.
+`cmd/recon`, then anonymised: MAC addresses were remapped into IANA's documentation OUI `00-00-5E-00-53-xx`, IPv4
+addresses into TEST-NET-1 `192.0.2.0/24`, EUI-64 addresses rebuilt from the remapped MACs, and host names, SSIDs, VPN
+endpoints, the router's device id (`connect_device_id`) and the `web_address` host replaced with stand-ins. The mapping
+is one-to-one, so joins across files still work — the same device is the same MAC in every fixture. The NTP servers
+are two public pools.
 
 Credentials are already `<redacted>`: `Client.Call` masks them before anything reaches disk.
 `TestFixturesCarryNoSecrets` keeps it that way.
+
+`TestFixturesUseDocumentationAddresses` holds a value that is a MAC to `00-00-5E-00-53-xx` (a bare twelve-hex one only
+under `device_id` and keys containing `mac`), IPv4 addresses to TEST-NET-1, `0.0.0.0` or `255.x.x.x`, and IPv6 addresses
+to `fe80::/10`, `2001:db8::/32` or `::`; `TestFixturesCarryOnlyStandInIdentities` holds the MAC an EUI-64 address is
+built from to `00-00-5E-00-53-xx`, a value under a key containing `ssid` (not `multissid`) to empty or `testnet*`,
+`ntp_svr*` to `europe.pool.ntp.org` or `nl.pool.ntp.org`, `connect_device_id` and any run of exactly 40 hex digits under
+another key (alone or inside text) to the stand-in `client_times.json` carries, and `endpoint_address` and the
+`web_address` host to TEST-NET-1 or a name in `example.net`, `example.com` or `example.org`.
 
 Shapes, field names, value formats and counts are untouched, which is the point:
 these are what the firmware actually sends, including the awkward parts —
@@ -16,8 +26,8 @@ expected.
 Identity is what gets replaced, not hardware: port names (`wanlan1g`, `lan1`), vendor strings and protocol values stay
 as the firmware sends them.
 
-`internal/exporter` reads the same directory rather than keeping a second copy, so one anonymisation guard covers every
-fixture in the repo.
+`internal/exporter` reads the same directory rather than keeping a second copy, so the three guards cover every fixture
+in the repo.
 
 One row per file, because the names do not always give the endpoint away:
 `ports.json` comes from `form=router` and `vpn_tunnels.json` from `form=server`. The paths are the ones in
@@ -49,6 +59,13 @@ prefix every endpoint carries.
 | `mesh_nodes.json`            | `easymesh_network?form=get_mesh_device_list_all`                                  |
 | `firmware.json`              | `firmware?form=upgrade`                                                           |
 | `time.json`                  | `time?form=settings`                                                              |
+| `ap_clients.json`            | `smart_network?form=game_accelerator` `loadDevice`, access point mode             |
+| `ap_status_all.json`         | `status?form=all`, access point mode, derived from `status_all.json`              |
+| `ap_status_internet.json`    | `status?form=internet`, access point mode                                         |
+
+Unlike the other files, `ap_status_all.json` is derived, not captured: it is `status_all.json` without the eleven keys
+an access point leaves out, so only its key set is taken from a real access point reply and its values are
+router-mode ones.
 
 `security_upnp_service.json`, `security_nat_vs.json` and `security_nat_pt.json`
 are `{}`: the reference device has no UPnP mapping and no forwarding rule. That is the state the "a forward appeared"

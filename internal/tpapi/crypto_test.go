@@ -2,6 +2,7 @@ package tpapi
 
 import (
 	"bytes"
+	"crypto/aes"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/rsa"
@@ -73,12 +74,54 @@ func TestAESEmptyBody(t *testing.T) {
 }
 
 func TestAESRejectsGarbage(t *testing.T) {
-	c, _ := NewCipher()
+	// A random key gives this blob a valid padding tail about once in 256 runs.
+	c := &Cipher{Key: []byte("0123456789012345"), IV: []byte("5432109876543210")}
 	if _, err := c.Decrypt("Ml48QjvcV9noPpGtL+Bc2xoAs2LarTFV1qJCctKgDTmc0EzyV4LFm5Jc8MvGA8grHxrs77hOnHGXuu9gtDk8UA=="); err == nil {
 		t.Fatal("decrypting someone else's blob with our key should fail padding")
 	}
 	if _, err := c.Decrypt(""); err == nil {
 		t.Fatal("an empty ciphertext is not a valid one")
+	}
+}
+
+// PKCS#7: the last byte n is 1 to the block size and the last n bytes all equal
+// n; anything else is an error. Every input is whole blocks, so only the padding
+// can refuse one.
+func TestPKCS7UnpadStripsOnlyValidPadding(t *testing.T) {
+	payload := []byte("abcdefghijklmnop") // one block, no byte of it a padding value
+	padded := func(p []byte, tail ...byte) []byte { return append(bytes.Clone(p), tail...) }
+	repeat := func(b byte, n int) []byte { return bytes.Repeat([]byte{b}, n) }
+
+	for _, tc := range []struct {
+		name    string
+		in      []byte
+		want    []byte
+		wantErr bool
+	}{
+		{name: "a padding of 1", in: padded(payload[:15], 1), want: payload[:15]},
+		{name: "a padding of 2", in: padded(payload[:14], 2, 2), want: payload[:14]},
+		{name: "a whole block of padding", in: padded(payload, repeat(16, 16)...), want: payload},
+		{name: "a last byte of 0", in: padded(payload[:15], 0), wantErr: true},
+		// Seventeen bytes of 17: only the block size refuses it.
+		{name: "a last byte above the block size", in: padded(payload[:15], repeat(17, 17)...), wantErr: true},
+		// The byte before a final 2 is 2: neither less nor more.
+		{name: "a last byte of 2 after a 1", in: padded(payload[:14], 1, 2), wantErr: true},
+		{name: "a last byte of 2 after a 3", in: padded(payload[:14], 3, 2), wantErr: true},
+		{name: "a padding block whose first byte is 15",
+			in: append(padded(payload, 15), repeat(16, 15)...), wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := pkcs7Unpad(tc.in, aes.BlockSize)
+			switch {
+			case tc.wantErr && err == nil:
+				t.Errorf("pkcs7Unpad(% x) = % x, want an error: the last byte n is 1 to %d and the last n "+
+					"bytes all equal n", tc.in, got, aes.BlockSize)
+			case !tc.wantErr && err != nil:
+				t.Errorf("pkcs7Unpad(% x): %v, want % x", tc.in, err, tc.want)
+			case !tc.wantErr && !bytes.Equal(got, tc.want):
+				t.Errorf("pkcs7Unpad(% x) = % x, want % x", tc.in, got, tc.want)
+			}
+		})
 	}
 }
 

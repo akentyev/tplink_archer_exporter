@@ -28,6 +28,7 @@ type Client struct {
 	cipher   *Cipher
 	signKey  *PubKey
 	features Features
+	mode     string
 	seq      int64
 	hash     string
 	stok     string
@@ -58,6 +59,12 @@ func New(host, username, password string, timeout time.Duration) (*Client, error
 
 // Features reports what the device said about itself during Login.
 func (c *Client) Features() Features { return c.features }
+
+// Mode reports the operation mode the device named in its login?form=keys reply
+// during the last Login, trimmed and lowercased; the firmware's list is "router",
+// "ap", "repeater", "client" and "multissid". It is empty before the first Login
+// and when the reply named none.
+func (c *Client) Mode() string { return c.mode }
 
 // ---------------------------------------------------------------------------
 // Transport
@@ -322,6 +329,8 @@ func (c *Client) fetchFeatures(ctx context.Context) error {
 	return nil
 }
 
+// fetchKey returns the RSA public key login?form=<form> carries under field,
+// and records the same reply's operation mode, which Mode reports.
 func (c *Client) fetchKey(ctx context.Context, form, field string) (*PubKey, error) {
 	u := fmt.Sprintf("%s/cgi-bin/luci/;stok=/login?form=%s", c.Host, form)
 	env, err := c.call(ctx, u, "operation=read", modePlain)
@@ -331,12 +340,18 @@ func (c *Client) fetchKey(ctx context.Context, form, field string) (*PubKey, err
 	if !env.Success {
 		return nil, fmt.Errorf("router refused: %s", env.errCode())
 	}
-	// The object carries unrelated scalars beside the key pair ("mode",
-	// "username"), so pick out one field rather than decoding the whole map.
+	// The object carries scalars beside the key pair ("mode", "username"), so
+	// pick fields out of it rather than decoding the whole map.
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(env.Data, &fields); err != nil {
 		return nil, fmt.Errorf("expected an object, got %s", truncate(string(env.Data), 160))
 	}
+	// A reply without a mode, or with a non-string, leaves Mode empty rather
+	// than keeping the previous login's.
+	var mode string
+	_ = json.Unmarshal(fields["mode"], &mode)
+	c.mode = strings.ToLower(strings.TrimSpace(mode))
+
 	raw, ok := fields[field]
 	if !ok {
 		return nil, fmt.Errorf("no %q field; got %s", field, strings.Join(sortedKeys(fields), ", "))

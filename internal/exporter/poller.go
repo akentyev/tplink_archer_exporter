@@ -191,6 +191,9 @@ type Router interface {
 	Login(ctx context.Context) error
 	Call(ctx context.Context, path, operation string) (json.RawMessage, error)
 	Logout(ctx context.Context) error
+	// Mode is the operation mode the device named at the last Login; see
+	// tpapi.Client.Mode.
+	Mode() string
 }
 
 // Run polls until ctx is cancelled, then logs out to free the session. Poll
@@ -270,7 +273,10 @@ func (p *Poller) cycle(ctx context.Context) time.Time {
 		return start
 	}
 
-	snap, gathered, err := p.poll(ctx)
+	// Mode follows the keys reply of every Login, one that then failed included,
+	// so it is read only here: after a login that worked or was not needed.
+	mode := p.client.Mode()
+	snap, gathered, err := p.poll(ctx, mode)
 	switch {
 	case parent.Err() != nil:
 		// First in the switch: a cancel after one reply leaves poll with
@@ -285,9 +291,9 @@ func (p *Poller) cycle(ctx context.Context) time.Time {
 			slog.Info("polling again", "after", max(p.backoff, p.cooldown))
 		}
 		p.polledOK = true
-		if len(snap.Errors)*2 > len(sources) {
+		if asked := len(sourcesFor(mode)); len(snap.Errors)*2 > asked {
 			slog.Warn("most of the cycle did not answer", "failed", len(snap.Errors),
-				"of", len(sources), "took", time.Since(start))
+				"of", asked, "took", time.Since(start))
 		}
 		p.backoff = 0
 		// The escalation outlives a good cycle and only clears once the window
@@ -559,19 +565,20 @@ func (p *Poller) record(start time.Time, snap *Snapshot, gathered int, err error
 	}
 }
 
-// poll runs one cycle: every source in sources, assembled into a Snapshot.
-// An endpoint that fails lands in Snapshot.Errors and the cycle carries on —
-// a partial snapshot beats none.
+// poll runs one cycle: every source sourcesFor names for mode, assembled into a
+// Snapshot. An endpoint that fails lands in Snapshot.Errors and the cycle
+// carries on — a partial snapshot beats none.
 //
 // A session dying mid-cycle ends the cycle. The poller does not log in again to
 // finish it: a login from the address that already holds the session takes it
 // back in silence, so reconnecting is what evicts a person browsing from this
 // machine. What answered before that point is kept.
-func (p *Poller) poll(ctx context.Context) (snap *Snapshot, gathered int, err error) {
-	snap = &Snapshot{TakenAt: time.Now(), Errors: map[string]error{}}
-	replies := make(map[string]json.RawMessage, len(sources))
+func (p *Poller) poll(ctx context.Context, mode string) (snap *Snapshot, gathered int, err error) {
+	set := sourcesFor(mode)
+	snap = &Snapshot{TakenAt: time.Now(), Mode: mode, Errors: map[string]error{}}
+	replies := make(map[string]json.RawMessage, len(set))
 
-	for _, s := range sources {
+	for _, s := range set {
 		raw, err := p.client.Call(ctx, s.Path, s.Operation)
 		if errors.Is(err, tpapi.ErrSessionExpired) {
 			// Whatever answered before the session died is still good; what
@@ -587,10 +594,10 @@ func (p *Poller) poll(ctx context.Context) (snap *Snapshot, gathered int, err er
 		replies[s.Path] = raw
 	}
 	if len(replies) == 0 {
-		// sources[0] necessarily failed, and its error carries the sentinel a
+		// set[0] necessarily failed, and its error carries the sentinel a
 		// blocked session needs.
 		return snap, 0, fmt.Errorf("no endpoint answered, %d attempted: %w",
-			len(sources), snap.Errors[sources[0].Path])
+			len(set), snap.Errors[set[0].Path])
 	}
 	assemble(snap, replies)
 	return snap, len(replies), nil

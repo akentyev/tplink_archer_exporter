@@ -1,0 +1,6 @@
+{
+  "wan_internet_status": "unplugged",
+  "wanlan_internet_status": "unplugged",
+  "internet_status": "connected",
+  "modem_internet_status": "unplugged"
+}

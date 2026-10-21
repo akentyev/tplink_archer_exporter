@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -116,6 +117,72 @@ func parseClients(raw json.RawMessage) ([]Client, error) {
 		})
 	}
 	return out, wrap("game_accelerator", errors.Join(errs...))
+}
+
+// parseClientRadio reads signal, txrate and rxrate out of the reply parseClients
+// reads; wired rows carry none of them. The web UI divides the rates by 1000
+// under "Tx/Rx Rate(Mbps)", shows "- -" for 0 and -1, and does not show signal.
+func parseClientRadio(raw json.RawMessage) (map[string]ClientRadio, error) {
+	rows, err := listRows(raw)
+	if err != nil {
+		return nil, wrap("game_accelerator", err)
+	}
+	type wire struct {
+		MAC    string          `json:"mac"`
+		Signal json.RawMessage `json:"signal"`
+		TxRate json.RawMessage `json:"txrate"`
+		RxRate json.RawMessage `json:"rxrate"`
+	}
+	out := map[string]ClientRadio{}
+	seen := make(map[string]bool, len(rows))
+	for _, row := range rows {
+		var w wire
+		if json.Unmarshal(row, &w) != nil {
+			continue
+		}
+		mac := tpapi.NormalizeMAC(w.MAC)
+		if seen[mac] {
+			continue
+		}
+		seen[mac] = true
+		r := ClientRadio{
+			SignalDBm: radioSignal(w.Signal),
+			TxMbits:   radioRate(w.TxRate),
+			RxMbits:   radioRate(w.RxRate),
+		}
+		if r != (ClientRadio{}) {
+			out[mac] = r
+		}
+	}
+	return out, nil
+}
+
+func radioSignal(raw json.RawMessage) *float64 {
+	v, ok := radioValue(raw)
+	if !ok || v >= 0 {
+		return nil
+	}
+	return &v
+}
+
+// radioRate reads txrate or rxrate, which arrive in kbit/s, as Mbit/s.
+func radioRate(raw json.RawMessage) *float64 {
+	v, ok := radioValue(raw)
+	if !ok || v <= 0 {
+		return nil
+	}
+	v /= 1000
+	return &v
+}
+
+// radioValue reads a JSON number or a string holding one. ParseFloat also
+// takes the words Inf and NaN, which are no value.
+func radioValue(raw json.RawMessage) (float64, bool) {
+	v, err := strconv.ParseFloat(strings.TrimSpace(unquote(raw)), 64)
+	if err != nil || math.IsInf(v, 0) || math.IsNaN(v) {
+		return 0, false
+	}
+	return v, true
 }
 
 // parseClientTimes reads traffic?form=dev_name, keyed by normalised MAC.
@@ -521,7 +588,7 @@ func parseTunnels(raw json.RawMessage) ([]Tunnel, error) {
 	return out, wrap("vpn server", err)
 }
 
-// parseVPNServer reads vpn?form=enable.
+// parseVPNServer reads vpn?form=enable, the VPN client's on/off switch.
 func parseVPNServer(raw json.RawMessage) (*VPNServer, error) {
 	var w struct {
 		Enable any    `json:"enable"`
@@ -533,8 +600,8 @@ func parseVPNServer(raw json.RawMessage) (*VPNServer, error) {
 	return &VPNServer{Enabled: onOff(w.Enable), Type: w.Type}, nil
 }
 
-// parseVPNUsers reads vpn?form=vpn_user_list, where MACs come colon-separated
-// while every other endpoint uses dashes.
+// parseVPNUsers reads vpn?form=vpn_user_list, the VPN client's device list,
+// where MACs come colon-separated while every other endpoint uses dashes.
 func parseVPNUsers(raw json.RawMessage) ([]VPNUser, error) {
 	type wire struct {
 		MAC        string `json:"mac"`

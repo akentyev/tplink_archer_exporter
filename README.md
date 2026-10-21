@@ -19,7 +19,7 @@ not loudly.
 
 ## Exporter
 
-Polls ~23 endpoints on its own ticker and serves the last snapshot at
+Polls 23 endpoints on its own ticker, 11 on an [access point](#access-point-mode), and serves the last snapshot at
 `/metrics`. A scrape never reaches the router: it reads whatever the last poll produced, so Prometheus may scrape as
 often as it likes.
 
@@ -162,8 +162,9 @@ both are set. `-version` asks a question rather than setting anything, so it has
 There is no `-password` flag on purpose: a flag is visible in `ps`. Only the trailing newline is stripped from either
 source, since spaces can be part of a password, and setting both is refused.
 
-An interval under 30s starts with a warning: ~23 requests every few seconds is more than this hardware wants, and it
-makes the router's UI slow for whoever else is using it.
+An interval under 30s starts with a warning: 23 requests every few seconds is more than this hardware wants, and it
+makes the router's UI slow for whoever else is using it. The floor is the same on an access point, where a cycle is 11
+requests.
 
 ### What it says in the log
 
@@ -221,7 +222,9 @@ it says.
 ### Metrics
 
 `/metrics` is the list, each with its own HELP line. Speeds are bytes per second, traffic counters are bytes, CPU and
-memory are ratios in 0..1 — the units the firmware actually uses, not the ones its UI displays.
+memory are ratios in 0..1 — the units the firmware actually uses, not the ones its UI displays. Two speeds are in Mbit/s
+instead: `tplink_port_speed_mbits`, as the firmware sends it, and the client link rates, which
+[follow the UI](#client-radio).
 
 These describe the exporter rather than the router:
 
@@ -252,6 +255,83 @@ difference between the two zones and calls it drift.
 What did not answer is absent rather than zero. A missing `status?form=internet`
 publishes no `tplink_wan_status` at all, instead of a 0 that reads as "the internet is down"; the same holds for the
 security flags, where a 0 nobody read would be worse.
+
+### Access point mode
+
+The operation mode, set on the web UI's Operation Mode page, arrives in the `login?form=keys` reply that every login
+already fetches for the password key, so it costs no request. It is read again at every login: a device switched to
+another mode is polled as such from the next login on, without restarting the exporter.
+`tplink_operation_mode_info{mode}` carries it lowercased, with the value 1. When a login names no mode,
+`tplink_operation_mode_info` is left out rather than published with an empty `mode`.
+
+Every mode but `ap` — `router`, `repeater`, `client`, `multissid`, or none named — is polled and published as a router.
+`repeater`, `client` and `multissid` have not been measured.
+
+An access point gets 11 of the 23 endpoints: `smart_network?form=game_accelerator`, `traffic?form=dev_name`,
+`dhcps?form=client`, `?form=reservation` and `?form=setting`, `status?form=all`, `?form=router` and `?form=internet`,
+`firmware?form=upgrade`, `time?form=settings` and `easymesh_network?form=get_mesh_device_list_all`. Eleven of the 12
+left out have no entry in the access point's menu, or fail there; `status?form=wan_speed` is left out for what it
+reads, zeros.
+
+`status?form=internet` is polled because the access point's own Network Map reads it every 3 s and shows its
+`internet_status` as the connection status. What the field measures on an access point is inferred from that, not
+established. The reply feeds `tplink_wan_status{iface="internet"}` and `tplink_wan_status_info` as on a router, but no
+`iface="link"` series: on the reference device `wan_internet_status` read `unplugged` while the WAN port, the only one
+with a link, was up. That port's own state comes through `tplink_port_link{is_wan="true"}`, from `status?form=router`.
+
+| not polled on an access point            | why                                                               |
+|------------------------------------------|-------------------------------------------------------------------|
+| `status?form=wan_speed`                  | reads zeros                                                       |
+| `vpn?form=server`, `?form=vpn_user_list` | no VPN Client or VPN Server entry                                 |
+| `vpn?form=enable`                        | the same, and it fails with `set_vpn_enable commit config failed` |
+| `administration?form=remote`             | Administration draws no Remote Management card                    |
+| `upnp?form=enable`, `?form=service`      | no UPnP entry                                                     |
+| `nat?form=vs`, `?form=pt`, `?form=dmz`   | no Port Forwarding, Port Triggering or DMZ entry                  |
+| `security_settings?form=new_enable`      | no Firewall entry: Security holds Access Control alone            |
+| `imb?form=arp_list`                      | no IP & MAC Binding entry, and it fails with `unspecified`        |
+
+Of the ten replies that answered on the reference access point, `status?form=wan_speed` aside, five lists came back
+empty and four settings replies still carried a configuration (`upnp?form=enable` read `on`).
+
+So an access point has no `tplink_wan_speed_*`, no `tplink_vpn_*`, no `tplink_arp_entry_info`, and none of the
+security flags: `tplink_remote_management_enabled`, `tplink_upnp_*`, `tplink_port_forward_rules`, `tplink_dmz_enabled`,
+`tplink_firewall_ping_allowed`. `status?form=all` is still polled, but `wan_ipv4_uptime` is not read from it, so there
+is no `tplink_wan_uptime_seconds` either: an access point's reply has no `wan_ipv4_*` family, and on a router a missing
+uptime counts as the endpoint failing. The guest and IoT network flags come from the same reply and stay.
+
+Per-client traffic goes too: `tplink_client_traffic_bytes_total` and `tplink_client_speed_bytes`. On the reference
+device every client of the access point read 0 for `trafficUsage`, `downloadSpeed` and `uploadSpeed`, in both
+client-list replies of one sweep and in the live series, and outside router mode the web UI's client table shows Tx/Rx
+Rate and Duration where a router shows the real-time rate. That the firmware does not count per-client traffic there is
+an inference from the zeros and that table; published, the zeros would pass for clients that moved nothing.
+
+What stays is the client list (`tplink_client_info`, `tplink_client_session_seconds`, `tplink_clients` and the radio
+metrics below), CPU, memory, ports, Wi-Fi, firmware, the clock, the internet status, and DHCP and EasyMesh, which have
+entries in the access point's menu. On the reference device the DHCP server was off with its lists empty, and EasyMesh
+and `traffic?form=dev_name` answered empty too: no leases or reservations, no `tplink_mesh_node_*`, no
+`tplink_client_connected_since_seconds`.
+
+### Client radio
+
+In every mode the client list carries the radio link, for each client whose row has it. In both sweeps, the access
+point's and the router's, the wireless rows carried all three fields and the wired rows none; every wireless row was on
+2.4 GHz, and the access point had no wired client.
+
+| metric                        | from            | published only |
+|-------------------------------|-----------------|----------------|
+| `tplink_client_signal_dbm`    | `signal`        | below zero     |
+| `tplink_client_tx_rate_mbits` | `txrate` / 1000 | above zero     |
+| `tplink_client_rx_rate_mbits` | `rxrate` / 1000 | above zero     |
+
+The rates arrive in kbit/s and are published in Mbit/s, the way the web UI shows them under "Tx/Rx Rate(Mbps)", as a
+column outside router mode and in each row's expanded view on a router. Its tooltip calls them "the theoretical maximum
+rate at which your device transfer/receive wirelessly": a link rate, not throughput. The UI shows a rate of `0` or `-1`
+as `- -`, hence above zero. Whose transmit `txrate` is, the router's or the client's, is not established, so the two are
+separate metrics: a `dir` label would read like the one on `tplink_client_speed_bytes`, where `rx` is the client's
+download.
+
+The web UI never shows a client's `signal`, so it offers no rule there. The signal is published below zero, and `-1`
+counts as a value. dBm is read off the values' range; nothing confirms it.
 
 ### Push mode
 
@@ -338,7 +418,8 @@ did not exist yet when those cycles ran; `tplink_push_dropped_total` stayed at z
 `grafana/tplink-archer.json` draws the whole snapshot in rows — overview, a watchlist of the conditions worth an
 alert, WAN, router, clients, DHCP, VPN, exposure, the exporter's own health beside them so that "no clients" and
 "the router did not answer" cannot be confused, and push delivery, collapsed because it holds nothing unless
-`-push-url` is set.
+`-push-url` is set. The overview leads with the operation mode: on an access point, the panels over what it does not
+publish read "No data".
 
 It needs a Prometheus-compatible datasource holding these metrics; VictoriaMetrics serves them through Grafana's
 Prometheus datasource type. Dashboards → New → Import → Upload JSON file, then answer the one input, `DS_PROMETHEUS`.
@@ -355,10 +436,10 @@ curl -sX POST http://grafana:3000/api/dashboards/import -u admin:admin \
 Two variables: `datasource` re-points every panel at once, `instance` picks exporters and defaults to all of them.
 
 `ip` and `hostname` live only in `tplink_client_info`, so a client panel that wants a readable name joins against it on
-`(mac, instance)`. The panel descriptions say why `instance` is in there. An instant query takes the right side through
-`max by (mac, instance, hostname)`: `ip` is a label there, so a client that changes address puts two series into the
-query's lookback, and the join fails on the duplicate. Range queries survive it: VictoriaMetrics merges duplicate series
-whose samples do not overlap in time.
+`(mac, instance)`. The panel descriptions say why `instance` is in there. Every such join takes the right side through
+`max by (mac, instance, hostname)`. Every label it drops can change between cycles: `ip` on a new lease, `iface`,
+`guest`, `via` and `type` as the firmware reports them. Two series in one lookback window fail the join on the
+duplicate. VictoriaMetrics merges a one-off change in a range query, but not labels that alternate between cycles.
 
 A permanent lease has no `tplink_dhcp_lease_expiry_seconds` series, so its expiry cells in the lease table are empty
 rather than holding a far-future placeholder, and sorting on "expires in" still puts the soonest first.

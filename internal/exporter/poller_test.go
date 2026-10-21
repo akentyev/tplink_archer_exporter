@@ -82,6 +82,8 @@ type fakeRouter struct {
 	expireAfter int    // hits on expireOn to let through before the session goes
 	expireEvery string // re-armed on every login, for a tab that stays open
 	expireDelay int    // what expireAfter is re-armed to
+	mode        string // what Mode reports; "" is a keys reply that named no mode
+	loginMode   string // what a login that lands sets mode to; "" leaves mode alone
 }
 
 type routerCall struct {
@@ -105,6 +107,52 @@ func newFakeRouter(t *testing.T) *fakeRouter {
 			t.Fatalf("source %q has no fixture; add the reply to ../tpapi/testdata and name it in sourceFixture", s.Path)
 		}
 		r.replies[s.Path] = fixture(t, src.reply)
+	}
+	return r
+}
+
+// apFixture is what newAPRouter answers each access point source with. Only the
+// client list, status?form=all and status?form=internet have access point
+// fixtures; the other fixtures are the router's.
+var apFixture = map[string]string{
+	"admin/smart_network?form=game_accelerator": "ap_clients.json",
+	"admin/traffic?form=dev_name":               "{}",
+	"admin/dhcps?form=client":                   "{}",
+	"admin/dhcps?form=reservation":              "{}",
+	"admin/dhcps?form=setting":                  "dhcp_setting.json",
+	"admin/status?form=all":                     "ap_status_all.json",
+	"admin/status?form=router":                  "ports.json",
+	"admin/status?form=internet":                "ap_status_internet.json",
+	"admin/firmware?form=upgrade":               "firmware.json",
+	"admin/time?form=settings":                  "time.json",
+
+	"admin/easymesh_network?form=get_mesh_device_list_all": "{}",
+}
+
+// newAPRouter is an access point: only the sources of wantAPSources answer,
+// whatever apSources holds.
+func newAPRouter(t *testing.T) *fakeRouter {
+	t.Helper()
+	r := &fakeRouter{
+		replies: make(map[string]json.RawMessage, len(wantAPSources)),
+		callErr: map[string]error{},
+		blocked: map[string]bool{},
+		mode:    "ap",
+	}
+	if len(apFixture) != len(wantAPSources) {
+		t.Fatalf("apFixture holds %d endpoints for an access point poll set of %d", len(apFixture),
+			len(wantAPSources))
+	}
+	for _, s := range wantAPSources {
+		reply, ok := apFixture[s.Path]
+		switch {
+		case !ok:
+			t.Fatalf("access point source %q has no reply in apFixture", s.Path)
+		case reply == "{}":
+			r.replies[s.Path] = json.RawMessage(reply)
+		default:
+			r.replies[s.Path] = fixture(t, reply)
+		}
 	}
 	return r
 }
@@ -133,6 +181,9 @@ func (r *fakeRouter) Login(ctx context.Context) error {
 	defer r.mu.Unlock()
 	r.session, r.expired = true, false
 	r.expireOn, r.expireAfter = r.expireEvery, r.expireDelay
+	if r.loginMode != "" {
+		r.mode = r.loginMode
+	}
 	return nil
 }
 
@@ -183,6 +234,24 @@ func (r *fakeRouter) Logout(ctx context.Context) error {
 	}
 	r.session = false
 	return nil
+}
+
+func (r *fakeRouter) Mode() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.mode
+}
+
+func (r *fakeRouter) setMode(mode string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.mode = mode
+}
+
+func (r *fakeRouter) setLoginMode(mode string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.loginMode = mode
 }
 
 // fail makes one endpoint answer with err from now on.
@@ -303,6 +372,14 @@ func (r *fakeRouter) callLog() []routerCall {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return append([]routerCall(nil), r.calls...)
+}
+
+func requests(calls []routerCall) []string {
+	out := make([]string, 0, len(calls))
+	for _, c := range calls {
+		out = append(out, c.Path+" "+c.Operation)
+	}
+	return out
 }
 
 func (r *fakeRouter) timesCalled(path string) int {
@@ -540,6 +617,260 @@ func fixtureWAN() WAN {
 		UpBytesPerS:   23401,
 		SpeedTakenAt:  time.Unix(1786802858, 0),
 	}
+}
+
+func TestAccessPointCyclePollsOnlyItsSources(t *testing.T) {
+	rt := newAPRouter(t)
+	cfg := testConfig()
+
+	synctest.Test(t, func(t *testing.T) {
+		p, stop := startPoller(t, rt, cfg)
+		defer stop()
+
+		st := awaitCycle(t, p, cfg)
+		snap := st.Snapshot
+		if snap == nil {
+			t.Fatalf("a cycle on an access point produced no snapshot; LastErr = %v", st.LastErr)
+		}
+		if got, want := requests(rt.callLog()), pollSet(wantAPSources); !slices.Equal(got, want) {
+			t.Errorf("one cycle on an access point made these requests:\n\t%s\nwant its eleven sources, once "+
+				"each, in order and with their operations:\n\t%s",
+				strings.Join(got, "\n\t"), strings.Join(want, "\n\t"))
+		}
+		if snap.Mode != "ap" {
+			t.Errorf("Snapshot.Mode = %q, want %q, the mode the device named", snap.Mode, "ap")
+		}
+		if len(snap.Errors) != 0 {
+			t.Errorf("every access point source answered, yet the snapshot reports errors: %v", snap.Errors)
+		}
+		if len(st.EndpointErrors) != 0 {
+			t.Errorf("EndpointErrors = %v after a cycle in which every source asked answered; an endpoint the "+
+				"access point is not polled on has no tplink_scrape_errors_total to carry", st.EndpointErrors)
+		}
+		if !st.Up || st.LastErr != nil {
+			t.Errorf("Up = %v, LastErr = %v after a cycle in which every source asked answered", st.Up, st.LastErr)
+		}
+		if wan := snap.WAN; wan == nil {
+			t.Error("no WAN on an access point, though status?form=internet answered")
+		} else {
+			if !wan.HaveStatus || !wan.InternetUp || wan.State != "connected" {
+				t.Errorf("HaveStatus %v, InternetUp %v, State %q; want true, true, %q, the internet_status of "+
+					"ap_status_internet.json", wan.HaveStatus, wan.InternetUp, wan.State, "connected")
+			}
+			if wan.HaveUptime || wan.HaveSpeed {
+				t.Errorf("HaveUptime %v, HaveSpeed %v on an access point: its status?form=all is not read for "+
+					"wan_ipv4_uptime and status?form=wan_speed is not polled", wan.HaveUptime, wan.HaveSpeed)
+			}
+		}
+
+		sec := snap.Security
+		if sec == nil {
+			t.Fatal("no Security on an access point; its guest and IoT networks arrive in status?form=all, " +
+				"which answered")
+		}
+		for name, v := range securityFlags(sec) {
+			if v != nil {
+				t.Errorf("Security.%s = %v on an access point, which is not polled on its endpoint; a reading "+
+					"nobody took is nil, and false would report it off", name, *v)
+			}
+		}
+		if sec.UPnPMappings != nil {
+			t.Errorf("Security.UPnPMappings = %d on an access point, which is not polled on upnp?form=service; "+
+				"want nil", *sec.UPnPMappings)
+		}
+		for _, kind := range []string{"vs", "pt"} {
+			if n, ok := sec.PortForwards[kind]; ok {
+				t.Errorf("Security.PortForwards[%q] = %d on an access point, which is not polled on nat?form=%s; "+
+					"the key is set only when its endpoint was read", kind, n, kind)
+			}
+		}
+		for _, band := range []string{"2g", "5g"} {
+			if _, ok := sec.GuestNetworks[band]; !ok {
+				t.Errorf("Security.GuestNetworks has no %q; guest_%s_enable is in the access point's "+
+					"status?form=all: %v", band, band, sec.GuestNetworks)
+			}
+			if _, ok := sec.IoTNetworks[band]; !ok {
+				t.Errorf("Security.IoTNetworks has no %q; iot_%s_enable is in the access point's "+
+					"status?form=all: %v", band, band, sec.IoTNetworks)
+			}
+		}
+	})
+}
+
+func TestRouterModesPollEverySource(t *testing.T) {
+	for _, tc := range []struct{ name, mode string }{
+		{"no mode named", ""},
+		{"router", "router"},
+		{"repeater", "repeater"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rt := newFakeRouter(t)
+			rt.setMode(tc.mode)
+			cfg := testConfig()
+
+			synctest.Test(t, func(t *testing.T) {
+				p, stop := startPoller(t, rt, cfg)
+				defer stop()
+
+				st := awaitCycle(t, p, cfg)
+				snap := st.Snapshot
+				if snap == nil {
+					t.Fatalf("a cycle in mode %q produced no snapshot; LastErr = %v", tc.mode, st.LastErr)
+				}
+				if got, want := requests(rt.callLog()), pollSet(wantRouterSources); !slices.Equal(got, want) {
+					t.Errorf("one cycle in mode %q made these requests:\n\t%s\nwant the whole poll set, once each, "+
+						"in order and with their operations:\n\t%s",
+						tc.mode, strings.Join(got, "\n\t"), strings.Join(want, "\n\t"))
+				}
+				if snap.Mode != tc.mode {
+					t.Errorf("Snapshot.Mode = %q, want %q, the mode the device named", snap.Mode, tc.mode)
+				}
+				if len(snap.Errors) != 0 {
+					t.Errorf("every endpoint answered in mode %q, yet the snapshot reports errors: %v",
+						tc.mode, snap.Errors)
+				}
+				switch want := fixtureWAN(); {
+				case snap.WAN == nil:
+					t.Errorf("no WAN in mode %q although all three of its sources answered", tc.mode)
+				case *snap.WAN != want:
+					t.Errorf("WAN = %+v in mode %q, want %+v — only an access point is spared the uptime "+
+						"in status?form=all", *snap.WAN, tc.mode, want)
+				}
+			})
+		})
+	}
+}
+
+func TestModeIsReadEveryCycle(t *testing.T) {
+	rt := newFakeRouter(t)
+	rt.setMode("router")
+	cfg := testConfig()
+
+	synctest.Test(t, func(t *testing.T) {
+		p, stop := startPoller(t, rt, cfg)
+		defer stop()
+
+		first := awaitCycle(t, p, cfg)
+		if first.Snapshot == nil {
+			t.Fatalf("the first cycle, in router mode, produced no snapshot; LastErr = %v", first.LastErr)
+		}
+		polled := rt.callLog()
+		if got, want := requests(polled), pollSet(wantRouterSources); !slices.Equal(got, want) {
+			t.Fatalf("the first cycle, in router mode, made %d requests:\n\t%s\nwant the %d of the whole poll "+
+				"set:\n\t%s", len(got), strings.Join(got, "\n\t"), len(want), strings.Join(want, "\n\t"))
+		}
+
+		rt.setMode("ap")
+		// Half way between the second cycle and the third.
+		time.Sleep(cfg.Interval + cfg.Interval/2)
+		synctest.Wait()
+
+		st := p.State()
+		if n := len(rt.loginTimes()); n != 1 {
+			t.Fatalf("%d logins by the second cycle, want 1: the session is reused, so the mode changed with "+
+				"no login and that is what is measured here", n)
+		}
+		if st.Snapshot == nil || !st.Snapshot.TakenAt.After(first.Snapshot.TakenAt) {
+			t.Fatalf("no second snapshot in the %v after the first; LastErr = %v",
+				cfg.Interval+cfg.Interval/2, st.LastErr)
+		}
+		second := requests(rt.callLog()[len(polled):])
+		if want := pollSet(wantAPSources); !slices.Equal(second, want) {
+			t.Errorf("the cycle after the device named \"ap\" made these requests:\n\t%s\nwant the access point's "+
+				"eleven sources:\n\t%s\nthe mode a cycle polls under is read in that cycle",
+				strings.Join(second, "\n\t"), strings.Join(want, "\n\t"))
+		}
+		if st.Snapshot.Mode != "ap" {
+			t.Errorf("Snapshot.Mode = %q in the cycle after the device named %q", st.Snapshot.Mode, "ap")
+		}
+		if !maps.Equal(st.EndpointErrors, first.EndpointErrors) {
+			t.Errorf("EndpointErrors went %v -> %v over a cycle in which every source asked answered; the "+
+				"router sources an access point is not polled on did not fail", first.EndpointErrors,
+				st.EndpointErrors)
+		}
+	})
+}
+
+// tpapi.Client.Mode is "" until the first Login and changes only at one.
+func TestModeIsReadAfterTheLogin(t *testing.T) {
+	rt := newAPRouter(t)
+	rt.setMode("")
+	rt.setLoginMode("ap")
+	cfg := testConfig()
+
+	synctest.Test(t, func(t *testing.T) {
+		p, stop := startPoller(t, rt, cfg)
+		defer stop()
+
+		st := awaitCycle(t, p, cfg)
+		if st.Snapshot == nil {
+			t.Fatalf("the first cycle on an access point produced no snapshot; LastErr = %v", st.LastErr)
+		}
+		if got, want := requests(rt.callLog()), pollSet(wantAPSources); !slices.Equal(got, want) {
+			t.Errorf("the first cycle, whose login named \"ap\", made these requests:\n\t%s\nwant the access "+
+				"point's eleven sources, in order:\n\t%s\nMode is \"\" until the first Login, so the cycle reads it "+
+				"after its login", strings.Join(got, "\n\t"), strings.Join(want, "\n\t"))
+		}
+		if st.Snapshot.Mode != "ap" {
+			t.Errorf("Snapshot.Mode = %q, want %q, the mode the cycle's own login named", st.Snapshot.Mode, "ap")
+		}
+		if len(st.EndpointErrors) != 0 {
+			t.Errorf("EndpointErrors = %v after the first cycle; under the mode its login named, the cycle asks the "+
+				"access point only what it answers and reads status?form=all as an access point's", st.EndpointErrors)
+		}
+	})
+}
+
+func TestRenewedLoginSwitchesThePollSet(t *testing.T) {
+	// Every source answers, so the device can be polled as either.
+	rt := newFakeRouter(t)
+	rt.setLoginMode("ap")
+	cfg := testConfig()
+	// Due half way between the first two ticks, so the second cycle renews.
+	cfg.SessionRenew = cfg.Interval / 2
+
+	synctest.Test(t, func(t *testing.T) {
+		p, stop := startPoller(t, rt, cfg)
+		defer stop()
+
+		first := awaitCycle(t, p, cfg)
+		if first.Snapshot == nil {
+			t.Fatalf("the first cycle produced no snapshot; LastErr = %v", first.LastErr)
+		}
+		if got, want := requests(rt.callLog()), pollSet(wantAPSources); !slices.Equal(got, want) {
+			t.Fatalf("the first cycle, whose login named \"ap\", made these requests:\n\t%s\nwant the access "+
+				"point's eleven sources:\n\t%s", strings.Join(got, "\n\t"), strings.Join(want, "\n\t"))
+		}
+		rt.setLoginMode("router")
+
+		// Half way between the second cycle and the third.
+		time.Sleep(cfg.Interval + cfg.Interval/2)
+		synctest.Wait()
+		if logins, logouts := len(rt.loginTimes()), rt.logoutCount(); logins != 2 || logouts != 1 {
+			t.Fatalf("%d logins and %d logouts by the second cycle, want 2 and 1: with SessionRenew at %v the "+
+				"second cycle replaces the session, and that renewal is the only login since the first",
+				logins, logouts, cfg.SessionRenew)
+		}
+		polled := rt.callLog()
+
+		time.Sleep(cfg.Interval)
+		synctest.Wait()
+
+		st := p.State()
+		third := requests(rt.callLog()[len(polled):])
+		if want := pollSet(wantRouterSources); !slices.Equal(third, want) {
+			t.Errorf("the cycle after the renewal, whose login named \"router\", made these requests:\n\t%s\nwant "+
+				"the router's 23 sources, in order:\n\t%s\nthe mode a cycle polls under is the one the last login "+
+				"named", strings.Join(third, "\n\t"), strings.Join(want, "\n\t"))
+		}
+		switch {
+		case st.Snapshot == nil:
+			t.Errorf("no snapshot after the cycle that followed the renewal; LastErr = %v", st.LastErr)
+		case st.Snapshot.Mode != "router":
+			t.Errorf("Snapshot.Mode = %q after the cycle that followed the renewal, want %q, the mode the "+
+				"renewal's login named", st.Snapshot.Mode, "router")
+		}
+	})
 }
 
 // One WAN is built from three replies, and a missing one is not a reading:
@@ -3388,6 +3719,76 @@ func TestTruncatedCycleIsWarnedAbout(t *testing.T) {
 					t.Errorf("%d of %d endpoints failed and the cycle was warned about %d times; the warning is "+
 						"for a cycle that lost more than half its sources, and a few dead endpoints already "+
 						"show in tplink_scrape_errors_total. Log:\n%s", tc.failing, len(sources), n, logged)
+				}
+			})
+		})
+	}
+}
+
+// hasAttr says whether a TextHandler record carries key=value as a whole
+// attribute, so failed=6 is not found in failed=60.
+func hasAttr(record, key, value string) bool {
+	return strings.Contains(record+" ", " "+key+"="+value+" ")
+}
+
+// Six of an access point's eleven sources is most of the cycle; six of a
+// router's 23 is not.
+func TestAccessPointWarnsAgainstItsOwnPollSet(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		failing  int
+		wantWarn bool
+	}{
+		{"just under half of the eleven", 5, false},
+		{"just over half", 6, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rt := newAPRouter(t)
+			for _, s := range apSources[:tc.failing] {
+				rt.fail(s.Path, errors.New("errorcode=00000002"))
+			}
+			cfg := testConfig()
+			logged := captureLog(t, slog.LevelWarn)
+
+			synctest.Test(t, func(t *testing.T) {
+				p, stop := startPoller(t, rt, cfg)
+				defer stop()
+
+				awaitCycle(t, p, cfg)
+				time.Sleep(2 * cfg.Interval)
+				synctest.Wait()
+
+				st := p.State()
+				if !st.Up || st.Snapshot == nil {
+					t.Fatalf("a cycle that lost %d of an access point's %d sources left Up=%v and a snapshot=%v; "+
+						"a partial cycle publishes what answered. LastErr = %v", tc.failing, len(wantAPSources),
+						st.Up, st.Snapshot != nil, st.LastErr)
+				}
+				if n := len(st.Snapshot.Errors); n != tc.failing {
+					t.Fatalf("%d endpoints failed in the last cycle, want the %d the test broke; the count is what "+
+						"the warning is decided on: %v", n, tc.failing, st.Snapshot.Errors)
+				}
+
+				recs := logged.records(truncatedMsg)
+				if !tc.wantWarn {
+					if len(recs) != 0 {
+						t.Errorf("%d of an access point's %d sources failed, under half, and the cycle was warned "+
+							"about %d times; the warning is for more than half. Log:\n%s",
+							tc.failing, len(wantAPSources), len(recs), logged)
+					}
+					return
+				}
+				if len(recs) == 0 {
+					t.Fatalf("%d of an access point's %d sources failed and nothing was logged at warn; measured "+
+						"against the router's %d it is under half, and against the cycle's own set it is most of "+
+						"it. Log:\n%s", tc.failing, len(wantAPSources), len(sources), logged)
+				}
+				failed, of := fmt.Sprint(tc.failing), fmt.Sprint(len(wantAPSources))
+				for _, rec := range recs {
+					if !hasAttr(rec, "failed", failed) || !hasAttr(rec, "of", of) {
+						t.Errorf("the record does not carry failed=%s and of=%s: %s\nthe count is out of the "+
+							"sources the cycle asked, not out of the router's %d", failed, of, rec, len(sources))
+					}
 				}
 			})
 		})
